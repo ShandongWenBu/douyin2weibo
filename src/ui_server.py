@@ -7,6 +7,7 @@ import asyncio
 import datetime
 import json
 import mimetypes
+import os
 import socket
 import subprocess
 import sys
@@ -25,6 +26,7 @@ from .input_parser import TaskInput, parse_line
 from .main import _load_ledger, _save_ledger, execute_pipeline
 
 _STATE_LOCK = threading.Lock()
+_SERVER_REF: dict[str, Any] = {"server": None, "port": 8765}
 _APP_STATE: dict[str, Any] = {
     "running": False,
     "logs": [],
@@ -135,6 +137,37 @@ def _pick_native_folder(initial_dir: Path) -> str | None:
         out = (res.stdout or "").strip()
         return out or None
     raise RuntimeError("当前系统不支持弹窗选目录，请直接点「改路径」输入文件夹路径。")
+
+
+def _run_git(args: list[str], cwd: Path, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        env=env,
+    )
+
+
+def _schedule_self_restart() -> None:
+    def _do_restart() -> None:
+        srv = _SERVER_REF.get("server")
+        port = int(_SERVER_REF.get("port") or 8765)
+        if srv is not None:
+            try:
+                srv.shutdown()
+                srv.server_close()
+            except Exception:
+                pass
+        subprocess.Popen([sys.executable, "-m", "src.ui_server", "--port", str(port), "--no-open"])
+        os._exit(0)
+
+    threading.Timer(0.4, _do_restart).start()
 
 
 def _login_worker(platform: str) -> None:
@@ -354,12 +387,15 @@ _HTML_PAGE = """<!DOCTYPE html>
         </div>
       </div>
       <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
-        <button class="btn btn-soft" onclick="openOutputRoot()">📂 打开桌面输出目录</button>
+        <button class="btn btn-soft" onclick="openOutputRoot()">📂 打开输出目录</button>
         <button class="btn" onclick="copyText('https://weibo.com/upload/channel', '微博上传页网址', this)">🔗 复制上传页网址</button>
         <button class="btn" onclick="copyText(document.getElementById('output-root-path').textContent, '输出总目录路径', this)">📋 复制目录路径</button>
+        <button class="btn" id="btn-check-update" onclick="checkUpdate()">🔄 检查更新</button>
         <button class="btn" id="btn-toggle-runner" onclick="toggleRunnerPanel()">🔽 收起抓取面板</button>
       </div>
     </div>
+
+    <div id="update-banner" class="panel" style="display:none; background:#eff6ff; border-color:#bfdbfe; padding:12px 16px;"></div>
 
     <div class="panel" id="runner-panel">
       <div class="tabs">
@@ -665,6 +701,75 @@ _HTML_PAGE = """<!DOCTYPE html>
     async function openOutputRoot() {
       await fetch("/api/open-output-root", { method: "POST", headers: {"Content-Type": "application/json"}, body: "{}" });
       showToast("已打开输出总目录");
+    }
+    async function checkUpdate() {
+      const btn = document.getElementById("btn-check-update");
+      const banner = document.getElementById("update-banner");
+      btn.disabled = true;
+      btn.textContent = "⏳ 检查中...";
+      try {
+        const r = await fetch("/api/check-update", { method: "POST", headers: {"Content-Type": "application/json"}, body: "{}" });
+        const d = await r.json();
+        banner.style.display = "";
+        if (!r.ok) {
+          banner.style.background = "var(--red-bg)";
+          banner.style.borderColor = "var(--red-bd)";
+          banner.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><span>⚠️ 检查更新失败：${esc(d.error || "未知错误")}</span><button class="btn" onclick="document.getElementById('update-banner').style.display='none'">关闭</button></div>`;
+          return;
+        }
+        if (d.up_to_date) {
+          banner.style.background = "var(--green-bg)";
+          banner.style.borderColor = "var(--green-bd)";
+          banner.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><span>✅ 已是最新版本（当前版本 <code>${esc(d.local_commit)}</code>）</span><button class="btn" onclick="document.getElementById('update-banner').style.display='none'">关闭</button></div>`;
+        } else {
+          banner.style.background = "#eff6ff";
+          banner.style.borderColor = "#bfdbfe";
+          const logs = (d.changelog || []).map(x => `<li><code>${esc(x)}</code></li>`).join("");
+          banner.innerHTML = `
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
+              <div>
+                <strong>🆕 发现 ${d.behind_count} 个更新</strong>（当前 <code>${esc(d.local_commit)}</code> → 最新 <code>${esc(d.remote_commit)}</code>）
+                ${logs ? `<ul style="margin:6px 0 0 18px;padding:0;font-size:12.5px;">${logs}</ul>` : ""}
+              </div>
+              <div style="display:flex;gap:8px;align-items:center;">
+                <button class="btn btn-primary" id="btn-apply-update" onclick="applyUpdate()">⬇️ 一键更新并重启</button>
+                <button class="btn" onclick="document.getElementById('update-banner').style.display='none'">稍后</button>
+              </div>
+            </div>
+          `;
+        }
+      } catch (e) {
+        banner.style.display = "";
+        banner.innerHTML = `⚠️ 检查更新出错：${esc(String(e))}`;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "🔄 检查更新";
+      }
+    }
+    async function applyUpdate() {
+      const btn = document.getElementById("btn-apply-update");
+      const banner = document.getElementById("update-banner");
+      if (btn) { btn.disabled = true; btn.textContent = "⏳ 正在拉取更新..."; }
+      const r = await fetch("/api/apply-update", { method: "POST", headers: {"Content-Type": "application/json"}, body: "{}" });
+      const d = await r.json();
+      if (!r.ok) {
+        banner.style.background = "var(--red-bg)";
+        banner.style.borderColor = "var(--red-bd)";
+        banner.innerHTML = `⚠️ 更新失败：${esc(d.error || "请尝试双击 更新代码.bat")}`;
+        return;
+      }
+      if (!d.restarting) {
+        showToast(d.message || "已是最新版本");
+        checkUpdate();
+        return;
+      }
+      banner.innerHTML = `⏳ 代码已更新，控制台正在自动重启，稍后将自动刷新页面...`;
+      const waitTimer = setInterval(async () => {
+        try {
+          const hr = await fetch("/api/health");
+          if (hr.ok) { clearInterval(waitTimer); location.reload(); }
+        } catch {}
+      }, 900);
     }
     function openPreview(videoPath, title) {
       const modal = document.getElementById("video-modal");
@@ -1211,6 +1316,67 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True, "output_dir": str(resolved), "cards": _load_existing_cards()})
             return
 
+        if parsed.path == "/api/check-update":
+            cfg = load_config()
+            root = cfg.project_root
+            if not (root / ".git").exists():
+                self._send_json({"error": "当前目录不是 Git 仓库（请用 git clone 拉取项目）"}, status=400)
+                return
+            try:
+                fetch_res = _run_git(["fetch", "origin"], root, timeout=20)
+                if fetch_res.returncode != 0:
+                    err_msg = (fetch_res.stderr or fetch_res.stdout or "git fetch 失败").strip()
+                    self._send_json({"error": err_msg}, status=400)
+                    return
+                local_c = _run_git(["rev-parse", "--short", "HEAD"], root).stdout.strip()
+                upstream_ref = _run_git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], root)
+                remote_branch = upstream_ref.stdout.strip() if upstream_ref.returncode == 0 else "origin/main"
+                remote_c = _run_git(["rev-parse", "--short", remote_branch], root).stdout.strip()
+                cnt_raw = _run_git(["rev-list", "--count", f"HEAD..{remote_branch}"], root).stdout.strip()
+                behind = int(cnt_raw or "0")
+                changelog: list[str] = []
+                if behind > 0:
+                    log_raw = _run_git(["log", "--format=%h %s", f"HEAD..{remote_branch}", "-n", "6"], root).stdout
+                    changelog = [ln.strip() for ln in log_raw.splitlines() if ln.strip()]
+                self._send_json({
+                    "ok": True,
+                    "up_to_date": behind == 0,
+                    "local_commit": local_c,
+                    "remote_commit": remote_c,
+                    "behind_count": behind,
+                    "changelog": changelog,
+                })
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=500)
+            return
+
+        if parsed.path == "/api/apply-update":
+            with _STATE_LOCK:
+                if _APP_STATE["running"]:
+                    self._send_json({"error": "当前有下载或登录任务在运行，请等完成后再更新"}, status=409)
+                    return
+            cfg = load_config()
+            root = cfg.project_root
+            try:
+                old_req = (root / "requirements.txt").read_text(encoding="utf-8") if (root / "requirements.txt").is_file() else ""
+                pull_res = _run_git(["pull", "--ff-only"], root, timeout=30)
+                if pull_res.returncode != 0:
+                    err_msg = (pull_res.stderr or pull_res.stdout or "git pull 失败").strip()
+                    self._send_json({"error": err_msg}, status=400)
+                    return
+                out_txt = (pull_res.stdout or "").strip()
+                if "Already up to date" in out_txt or "已经是最新的" in out_txt:
+                    self._send_json({"ok": True, "restarting": False, "message": "当前已是最新版本"})
+                    return
+                new_req = (root / "requirements.txt").read_text(encoding="utf-8") if (root / "requirements.txt").is_file() else ""
+                if new_req != old_req:
+                    subprocess.run([sys.executable, "-m", "pip", "install", "-r", str(root / "requirements.txt"), "--quiet"], check=False)
+                self._send_json({"ok": True, "restarting": True, "message": "更新拉取成功，正在重启控制台..."})
+                _schedule_self_restart()
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=500)
+            return
+
         if parsed.path == "/api/open-output-root":
             cfg = load_config()
             cfg.output_dir.mkdir(parents=True, exist_ok=True)
@@ -1264,7 +1430,10 @@ def main() -> None:
     args = parser.parse_args()
 
     port = args.port or _find_free_port(8765)
+    ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer(("127.0.0.1", port), ConsoleHandler)
+    _SERVER_REF["server"] = server
+    _SERVER_REF["port"] = port
     url = f"http://127.0.0.1:{port}/"
     print(f"douyin2weibo 可视化控制台已启动：{url}")
     print("保持此窗口开启即可在浏览器中操作；关闭本窗口即退出服务。")
