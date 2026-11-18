@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -179,3 +180,31 @@ def extract_title_and_hashtags(desc: str) -> tuple[str, list[str], str]:
     if not title:
         title = full_desc[:40].strip() or "无标题"
     return title, hashtags, full_desc
+
+
+def save_output_dir_to_config(new_dir: str, config_path: Path | None = None) -> Path:
+    """Persist a new output_dir to config.yaml while preserving comments and return resolved Path."""
+    cleaned = (new_dir or "").strip()
+    if not cleaned:
+        raise ValueError("存放目录不能为空")
+
+    cfg_file = config_path or (PROJECT_ROOT / "config.yaml")
+    if not cfg_file.is_file():
+        example_file = cfg_file.parent / "config.example.yaml"
+        if example_file.is_file():
+            shutil.copyfile(example_file, cfg_file)
+        else:
+            cfg_file.write_text("", encoding="utf-8")
+
+    base = cfg_file.parent.resolve()
+    resolved = _resolve_path(cleaned, base, cleaned)
+    resolved.mkdir(parents=True, exist_ok=True)
+
+    text = cfg_file.read_text(encoding="utf-8")
+    new_line = f"output_dir: {json.dumps(cleaned, ensure_ascii=False)}"
+    updated, count = re.subn(r"^output_dir\s*:.*$", new_line, text, count=1, flags=re.MULTILINE)
+    if count == 0:
+        suffix = "\n" if text and not text.endswith("\n") else ""
+        updated = f"{text}{suffix}{new_line}\n"
+    cfg_file.write_text(updated, encoding="utf-8")
+    return resolved

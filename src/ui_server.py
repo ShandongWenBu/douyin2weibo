@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from .config import load_config
+from .config import load_config, save_output_dir_to_config
 from .cookie_login import login_and_save_cookie
 from .douyin_fetcher import CaptchaRequiredError
 from .input_parser import TaskInput, parse_line
@@ -104,6 +104,37 @@ def _open_native_path(folder_path: Path, select_file: Path | None = None) -> Non
             subprocess.Popen(["explorer", str(folder_path)])
     else:
         subprocess.Popen(["xdg-open", str(folder_path)])
+
+
+def _pick_native_folder(initial_dir: Path) -> str | None:
+    """Open OS native folder chooser dialog and return selected path, or None if cancelled."""
+    if sys.platform == "darwin":
+        escaped = str(initial_dir).replace('"', '\\"')
+        script = (
+            f'try\n'
+            f'  set defaultLoc to POSIX file "{escaped}"\n'
+            f'  set chosen to choose folder with prompt "请选择解析视频存放目录" default location defaultLoc\n'
+            f'  return POSIX path of chosen\n'
+            f'on error\n'
+            f'  return ""\n'
+            f'end try'
+        )
+        res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=120)
+        out = (res.stdout or "").strip().rstrip("/")
+        return out or None
+    if sys.platform.startswith("win"):
+        escaped = str(initial_dir).replace("'", "''")
+        ps = (
+            "Add-Type -AssemblyName System.Windows.Forms;"
+            "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
+            "$d.Description = '请选择解析视频存放目录';"
+            f"$d.SelectedPath = '{escaped}';"
+            "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }"
+        )
+        res = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True, timeout=120)
+        out = (res.stdout or "").strip()
+        return out or None
+    raise RuntimeError("当前系统不支持弹窗选目录，请直接点「改路径」输入文件夹路径。")
 
 
 def _login_worker(platform: str) -> None:
@@ -305,7 +336,16 @@ _HTML_PAGE = """<!DOCTYPE html>
     <div class="topbar">
       <div>
         <h1>douyin2weibo 工作台</h1>
-        <div class="sub">文件输出总目录：<code id="output-root-path">加载中...</code></div>
+        <div class="sub" style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-top:4px;">
+          <span>视频存放目录：<code id="output-root-path">加载中...</code></span>
+          <button class="btn" style="padding:3px 8px; font-size:12px;" onclick="pickOutputDir()">📁 浏览选择</button>
+          <button class="btn" style="padding:3px 8px; font-size:12px;" onclick="toggleEditOutputDir()">✏️ 改路径</button>
+        </div>
+        <div id="output-dir-editor" style="display:none; margin-top:6px; gap:6px; align-items:center; flex-wrap:wrap;">
+          <input type="text" id="output-dir-input" placeholder="输入文件夹路径，例如 ~/Desktop/微博待发视频 或 D:\\微博视频" style="width:360px; padding:5px 8px; font-size:12.5px;" />
+          <button class="btn btn-primary" style="padding:5px 10px; font-size:12px;" onclick="saveOutputDir()">💾 保存目录</button>
+          <button class="btn" style="padding:5px 10px; font-size:12px;" onclick="toggleEditOutputDir(false)">取消</button>
+        </div>
         <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:7px; align-items:center; font-size:12.5px;">
           <span id="dy-login-badge" class="pill">抖音：检测中...</span>
           <button class="btn" onclick="startLogin('douyin')">🔑 扫码登录/换抖音号</button>
@@ -586,6 +626,41 @@ _HTML_PAGE = """<!DOCTYPE html>
         body: JSON.stringify({ package_dir: packageDir, select_file: selectFile || "" })
       });
       showToast("已在访达/文件夹中为你定位");
+    }
+    function toggleEditOutputDir(force) {
+      const box = document.getElementById("output-dir-editor");
+      const show = force !== undefined ? force : box.style.display === "none";
+      box.style.display = show ? "flex" : "none";
+      if (show) {
+        document.getElementById("output-dir-input").value = document.getElementById("output-root-path").textContent || "";
+      }
+    }
+    async function saveOutputDir() {
+      const val = document.getElementById("output-dir-input").value.trim();
+      if (!val) { showToast("请输入有效的文件夹路径"); return; }
+      const r = await fetch("/api/save-output-dir", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ output_dir: val })
+      });
+      const d = await r.json();
+      if (!r.ok) { showToast(d.error || "保存失败"); return; }
+      document.getElementById("output-root-path").textContent = d.output_dir;
+      cardsData = d.cards || [];
+      refreshDateOptions();
+      renderCards();
+      toggleEditOutputDir(false);
+      showToast("存放目录已更新");
+    }
+    async function pickOutputDir() {
+      const r = await fetch("/api/pick-output-dir", { method: "POST", headers: {"Content-Type": "application/json"}, body: "{}" });
+      const d = await r.json();
+      if (!r.ok) { showToast(d.error || "选目录失败"); return; }
+      if (d.cancelled) return;
+      document.getElementById("output-root-path").textContent = d.output_dir;
+      cardsData = d.cards || [];
+      refreshDateOptions();
+      renderCards();
+      showToast("存放目录已改为：" + d.output_dir);
     }
     async function openOutputRoot() {
       await fetch("/api/open-output-root", { method: "POST", headers: {"Content-Type": "application/json"}, body: "{}" });
@@ -1103,6 +1178,37 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             th = threading.Thread(target=_login_worker, args=(platform,), daemon=True)
             th.start()
             self._send_json({"ok": True})
+            return
+
+        if parsed.path == "/api/save-output-dir":
+            new_dir = str(body.get("output_dir") or "").strip()
+            try:
+                resolved = save_output_dir_to_config(new_dir)
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
+            with _STATE_LOCK:
+                if not _APP_STATE["running"]:
+                    _APP_STATE["cards"] = []
+            self._send_json({"ok": True, "output_dir": str(resolved), "cards": _load_existing_cards()})
+            return
+
+        if parsed.path == "/api/pick-output-dir":
+            cfg = load_config()
+            initial = cfg.output_dir if cfg.output_dir.is_dir() else Path.home()
+            try:
+                chosen = _pick_native_folder(initial)
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
+            if not chosen:
+                self._send_json({"ok": True, "cancelled": True})
+                return
+            resolved = save_output_dir_to_config(chosen)
+            with _STATE_LOCK:
+                if not _APP_STATE["running"]:
+                    _APP_STATE["cards"] = []
+            self._send_json({"ok": True, "output_dir": str(resolved), "cards": _load_existing_cards()})
             return
 
         if parsed.path == "/api/open-output-root":

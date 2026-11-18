@@ -369,6 +369,8 @@ async def run_pipeline(args: argparse.Namespace) -> int:
         cfg.dedup.min_date = args.since
     if args.latest is not None:
         cfg.latest_per_profile = max(1, args.latest)
+    if args.output_dir:
+        cfg.output_dir = Path(args.output_dir).expanduser().resolve()
 
     tasks: list[TaskInput] = []
     if args.url:
@@ -423,6 +425,7 @@ async def run_pipeline(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="douyin2weibo：抖音查重、无水印下载、1080P 转码与工作台生成")
     p.add_argument("--config", help="配置文件路径（默认 config.yaml）")
+    p.add_argument("--output-dir", help="输出视频存放目录覆盖")
     p.add_argument("--file", help="批量输入文件路径（默认 待发.txt）")
     p.add_argument("--url", help="单条抖音作品或主页链接")
     p.add_argument("--weibo", help="单条模式对应的微博号名")
