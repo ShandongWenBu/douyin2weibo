@@ -9,7 +9,8 @@
 ## 2. 模块地图（改什么看哪里，无需全库通读）
 | 需求 / 问题 | 对应文件 | 核心函数 / 说明 |
 | --- | --- | --- |
-| 控制台网页 UI、按钮、30字提醒、去抖音尾标、本地 HTTP API | `src/ui_server.py` | `_HTML_PAGE`（前端）与 `ConsoleHandler`（`/api/health`, `/api/init`, `/api/run`, `/api/status`, `/api/open-folder`, `/api/toggle-published`） |
+| 控制台网页 UI、按钮、30字提醒、去抖音尾标、本地 HTTP API | `src/ui_server.py` | `_HTML_PAGE`（前端）与 `ConsoleHandler`（`/api/health`, `/api/init`, `/api/login`, `/api/run`, `/api/status`, `/api/open-folder`, `/api/toggle-published`） |
+| 可见浏览器扫码登录并保存 Cookie | `src/cookie_login.py` | `login_and_save_cookie()`（支持在界面点按钮或 CLI 扫码换号） |
 | 离线静态 `工作台.html` 模板 | `src/workbench.py` | `render_workbench_html()` |
 | 输入格式解析（`待发.txt`、CSV 行、分享口令、单链接） | `src/input_parser.py` | `parse_line()`, `load_tasks_from_file()` |
 | 抖音接口拦截、无水印最高画质流选择、封面下载 | `src/douyin_fetcher.py` | `classify_douyin_url()`, `_pick_best_streams()`, `fetch_douyin_batch()` |

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_config
+from .cookie_login import login_and_save_cookie
 from .douyin_fetcher import CaptchaRequiredError
 from .input_parser import TaskInput, parse_line
 from .main import _load_ledger, _save_ledger, execute_pipeline
@@ -103,6 +104,18 @@ def _open_native_path(folder_path: Path, select_file: Path | None = None) -> Non
             subprocess.Popen(["explorer", str(folder_path)])
     else:
         subprocess.Popen(["xdg-open", str(folder_path)])
+
+
+def _login_worker(platform: str) -> None:
+    try:
+        cfg = load_config()
+        dst = cfg.douyin_cookie_path if platform == "douyin" else cfg.weibo_cookie_path
+        asyncio.run(login_and_save_cookie(platform, dst, log_fn=_append_log))
+    except Exception as exc:
+        _append_log(f"[登录未完成] {exc}")
+    finally:
+        with _STATE_LOCK:
+            _APP_STATE["running"] = False
 
 
 def _run_worker(payload: dict[str, Any]) -> None:
@@ -293,6 +306,12 @@ _HTML_PAGE = """<!DOCTYPE html>
       <div>
         <h1>douyin2weibo 工作台</h1>
         <div class="sub">文件输出总目录：<code id="output-root-path">加载中...</code></div>
+        <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:7px; align-items:center; font-size:12.5px;">
+          <span id="dy-login-badge" class="pill">抖音：检测中...</span>
+          <button class="btn" onclick="startLogin('douyin')">🔑 扫码登录/换抖音号</button>
+          <span id="wb-login-badge" class="pill">微博查重：检测中...</span>
+          <button class="btn" onclick="startLogin('weibo')">🔑 扫码登录/换微博小号</button>
+        </div>
       </div>
       <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
         <button class="btn btn-soft" onclick="openOutputRoot()">📂 打开桌面输出目录</button>
@@ -844,13 +863,40 @@ _HTML_PAGE = """<!DOCTYPE html>
           clearInterval(pollTimer);
           document.getElementById("btn-run").disabled = false;
           document.getElementById("btn-run").textContent = "🚀 开始处理";
+          refreshHealth();
         }
       }, 700);
+    }
+
+    async function refreshHealth() {
+      const r = await fetch("/api/health");
+      const h = await r.json();
+      const dyEl = document.getElementById("dy-login-badge");
+      const wbEl = document.getElementById("wb-login-badge");
+      dyEl.textContent = h.douyin_cookie_ok ? "抖音：✅ 已登录" : "抖音：❌ 未登录";
+      dyEl.className = "pill " + (h.douyin_cookie_ok ? "status-green" : "status-red");
+      wbEl.textContent = h.weibo_cookie_ok ? "微博查重：✅ 已登录" : "微博查重：⚠️ 未登录";
+      wbEl.className = "pill " + (h.weibo_cookie_ok ? "status-green" : "status-yellow");
+    }
+
+    async function startLogin(platform) {
+      const r = await fetch("/api/login", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ platform })
+      });
+      const d = await r.json();
+      if (!r.ok) { showToast(d.error || "无法打开登录窗口"); return; }
+      runnerCollapsed = false;
+      applyRunnerCollapse();
+      document.getElementById("btn-run").disabled = true;
+      showToast("请在弹出的浏览器窗口里扫码登录");
+      startPolling();
     }
 
     async function init() {
       applyRunnerCollapse();
       loadCleanOpts();
+      refreshHealth();
       document.getElementById("btn-view-card").classList.toggle("btn-primary", viewMode === "card");
       document.getElementById("btn-view-table").classList.toggle("btn-primary", viewMode === "table");
       const r = await fetch("/api/init");
@@ -1039,6 +1085,22 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 _APP_STATE["failures"] = []
                 _APP_STATE["summary"] = None
             th = threading.Thread(target=_run_worker, args=(body,), daemon=True)
+            th.start()
+            self._send_json({"ok": True})
+            return
+
+        if parsed.path == "/api/login":
+            platform = str(body.get("platform") or "")
+            if platform not in {"douyin", "weibo"}:
+                self._send_json({"error": "不支持的平台"}, status=400)
+                return
+            with _STATE_LOCK:
+                if _APP_STATE["running"]:
+                    self._send_json({"error": "当前有任务正在运行，请稍后再登录"}, status=409)
+                    return
+                _APP_STATE["running"] = True
+                _APP_STATE["logs"] = [f"正在打开可见浏览器窗口，请扫码登录 {platform}..."]
+            th = threading.Thread(target=_login_worker, args=(platform,), daemon=True)
             th.start()
             self._send_json({"ok": True})
             return
