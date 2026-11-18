@@ -1,0 +1,50 @@
+# douyin2weibo 配置文件模板（Mac / Windows 通用）
+# 首次使用请复制为 config.yaml，并按本机路径修改
+
+# 抖音 / 微博登录态 cookie（建议放在本项目的 cookies/ 目录下）
+douyin_cookie_path: "cookies/douyin_douyin-creator.json"
+weibo_cookie_path: "cookies/weibo_weibo-creator.json"
+
+# ffmpeg / ffprobe 路径（Windows 若已加入系统 PATH 或放在 bin/ 目录可留空自动查找）
+ffmpeg_path: ""
+ffprobe_path: ""
+
+# 输出目录与本地台账（默认直接放到桌面，按 YYYY-MM-DD_共N个 归档）
+output_dir: "~/Desktop/微博待发视频"
+ledger_path: "ledger.json"
+
+# 微博文案清洗（点击「复制简介」时自动去掉仅限抖音的尾标话题，纯本地规则 0 费用）
+weibo_clean:
+  strip_tag_keywords:
+    - "抖音精选"
+    - "上抖音"
+    - "来抖音"
+    - "抖音小助手"
+    - "青年创作者成长计划"
+    - "氪金兽"
+
+# 当输入为抖音主页链接时，默认抓取最新几条非置顶作品
+latest_per_profile: 1
+
+# 视频与封面转码参数
+transcode:
+  crf: 18
+  preset: "slow"
+  audio_bitrate: "192k"
+  upscale_sharpen: "unsharp=5:5:0.4:5:5:0.0"
+  downscale_sharpen: "unsharp=3:3:0.25:3:3:0.0"
+  cover_max_mb: 4.8
+
+# 微博查重与安全阈值设置
+dedup:
+  mode: "auto"
+  enable_global_search: false
+  lookback_days: 30
+  min_date: ""
+  daily_search_limit: 40
+  min_delay_sec: 8.0
+  max_delay_sec: 15.0
+  max_queries_per_video: 2
+  check_own_timelines: true
+  cache_same_day: true
+  headless: true

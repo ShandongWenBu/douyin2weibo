@@ -1,0 +1,20 @@
+# 虚拟环境与缓存
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+Thumbs.db
+
+# 运行生成物与本地状态
+logs/
+output/
+工作台.html
+ledger.json
+.dedup_state.json
+
+# 隐私、登录态与本机配置（不同步到 Git，避免覆盖和泄密）
+cookies/
+*.json
+!package.json
+config.yaml
+待发.txt
