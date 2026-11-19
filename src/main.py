@@ -8,6 +8,7 @@ import datetime
 import json
 import sys
 import threading
+import time
 import webbrowser
 from dataclasses import asdict
 from pathlib import Path
@@ -54,7 +55,11 @@ def _get_or_create_date_dir(output_root: Path, date_str: str) -> Path:
     return target
 
 
-def _finalize_date_dir_count(date_dir: Path, date_str: str) -> Path:
+def _finalize_date_dir_count(
+    date_dir: Path,
+    date_str: str,
+    log_fn: Callable[[str], None] = print,
+) -> Path:
     if not date_dir.is_dir():
         return date_dir
     pkg_count = sum(
@@ -66,8 +71,17 @@ def _finalize_date_dir_count(date_dir: Path, date_str: str) -> Path:
         return date_dir
     desired = date_dir.parent / f"{date_str}_共{pkg_count}个"
     if date_dir != desired and not desired.exists():
-        date_dir.rename(desired)
-        return desired
+        for attempt in range(2):
+            try:
+                date_dir.rename(desired)
+                return desired
+            except OSError:
+                if attempt == 0:
+                    time.sleep(0.5)
+        log_fn(
+            f"[提示] 目录 {date_dir.name} 正被资源管理器或上传软件占用，暂保留原目录名"
+            f"（目录内已有 {pkg_count} 条视频，不影响正常使用）"
+        )
     return date_dir
 
 
@@ -339,7 +353,7 @@ async def execute_pipeline(
             })
             log_fn(f"  [失败] {wb_name} ({vid.aweme_id}): {exc}")
 
-    final_date_dir = _finalize_date_dir_count(date_dir, today_str)
+    final_date_dir = _finalize_date_dir_count(date_dir, today_str, log_fn=log_fn)
     if final_date_dir != date_dir:
         old_prefix = str(date_dir)
         new_prefix = str(final_date_dir)
