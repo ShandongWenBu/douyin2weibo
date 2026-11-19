@@ -73,24 +73,40 @@ def resolve_redirect_url(url: str, timeout: int = 12) -> str:
     return handler.last_url
 
 
-def classify_douyin_url(url: str) -> tuple[str, str]:
-    """Return ('user', sec_uid) or ('video', aweme_id) after resolving short links."""
-    resolved = resolve_redirect_url(url)
-    m_user = re.search(r"/(?:share/)?user/([A-Za-z0-9_\-]+)", resolved)
-    if m_user:
-        return "user", m_user.group(1)
+def _extract_url_identity(url: str) -> tuple[str, str] | None:
+    """Extract ('video', aweme_id) or ('user', sec_uid) from a Douyin URL.
+    Always checks video/modal_id BEFORE user so profile modal links (?modal_id=...)
+    are correctly treated as single videos.
+    """
+    m_modal = re.search(r"[?&]modal_id=(\d+)", url)
+    if m_modal:
+        return "video", m_modal.group(1)
 
-    m_sec = re.search(r"[?&]sec_uid=([A-Za-z0-9_\-]+)", resolved)
-    if m_sec:
-        return "user", m_sec.group(1)
-
-    m_vid = re.search(r"/(?:share/)?video/(\d+)", resolved)
+    m_vid = re.search(r"/(?:share/)?(?:video|note)/(\d+)", url)
     if m_vid:
         return "video", m_vid.group(1)
 
-    m_modal = re.search(r"[?&]modal_id=(\d+)", resolved)
-    if m_modal:
-        return "video", m_modal.group(1)
+    m_user = re.search(r"/(?:share/)?user/([A-Za-z0-9_\-]+)", url)
+    if m_user:
+        return "user", m_user.group(1)
+
+    m_sec = re.search(r"[?&]sec_uid=([A-Za-z0-9_\-]+)", url)
+    if m_sec:
+        return "user", m_sec.group(1)
+
+    return None
+
+
+def classify_douyin_url(url: str) -> tuple[str, str]:
+    """Return ('user', sec_uid) or ('video', aweme_id), resolving short links when needed."""
+    direct = _extract_url_identity(url)
+    if direct:
+        return direct
+
+    resolved = resolve_redirect_url(url)
+    found = _extract_url_identity(resolved)
+    if found:
+        return found
 
     raise ValueError(f"无法识别的抖音链接（解析后：{resolved}）")
 

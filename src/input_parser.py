@@ -8,8 +8,11 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-_DOUYIN_URL_RE = re.compile(r"https?://(?:v\.douyin\.com|www\.douyin\.com|www\.iesdouyin\.com)/[^\s,，]+")
+_DOUYIN_URL_RE = re.compile(
+    r"https?://(?:v\.douyin\.com|www\.douyin\.com|douyin\.com|m\.douyin\.com|www\.iesdouyin\.com)/[^\s,，\"'<>]+"
+)
 _WEIBO_UID_RE = re.compile(r"weibo\.com/(?:u/)?(\d{5,})")
+_SHARE_NOISE_MARKERS = ("复制打开抖音", "复制此链接", "打开Dou音", "长按复制", ":/")
 
 
 @dataclass
@@ -44,8 +47,9 @@ def parse_line(line: str) -> TaskInput | None:
     if "外站主页链接" in stripped or "微博账号链接" in stripped:
         return None
 
-    # Try CSV format first if commas are present and a Douyin URL is inside
-    if "," in stripped and _DOUYIN_URL_RE.search(stripped):
+    # Try CSV format only when line looks like a real CSV row (has weibo URL or >= 2 commas, not share text)
+    is_share_blob = any(m in stripped for m in _SHARE_NOISE_MARKERS)
+    if not is_share_blob and (stripped.count(",") >= 2 or ("," in stripped and "weibo.com" in stripped)) and _DOUYIN_URL_RE.search(stripped):
         row = next(csv.reader(io.StringIO(stripped)))
         douyin_url = ""
         weibo_uid = ""
@@ -88,23 +92,25 @@ def parse_line(line: str) -> TaskInput | None:
         return None
 
     douyin_url = _clean_url(m_dy.group(0))
-    # Check remaining text after the URL (or tab-separated fields)
-    parts = re.split(r"\t+|\s{2,}", stripped)
-    if len(parts) == 1:
-        # Single-space separated: e.g. "https://v.douyin.com/xxx/ 微博名"
-        after = stripped[m_dy.end():].strip()
-        tokens = after.split() if after else []
-    else:
-        tokens = [p.strip() for p in parts if p.strip() and douyin_url not in p]
-
     weibo_name = ""
     weibo_uid = ""
-    for tok in tokens:
-        uid = _extract_weibo_uid(tok)
-        if uid and not weibo_uid:
-            weibo_uid = uid
-        elif not weibo_name:
-            weibo_name = tok
+
+    if not is_share_blob:
+        parts = re.split(r"\t+|\s{2,}", stripped)
+        if len(parts) == 1:
+            after = stripped[m_dy.end():].strip()
+            tokens = after.split() if after else []
+        else:
+            tokens = [p.strip() for p in parts if p.strip() and douyin_url not in p]
+
+        for tok in tokens:
+            if _DOUYIN_URL_RE.search(tok):
+                continue
+            uid = _extract_weibo_uid(tok)
+            if uid and not weibo_uid:
+                weibo_uid = uid
+            elif not weibo_name:
+                weibo_name = tok
 
     return TaskInput(
         douyin_url=douyin_url,
@@ -112,6 +118,43 @@ def parse_line(line: str) -> TaskInput | None:
         weibo_uid=weibo_uid,
         raw_line=stripped,
     )
+
+
+def parse_text_block(
+    text: str,
+    default_weibo_name: str = "",
+    default_weibo_uid: str = "",
+) -> list[TaskInput]:
+    """Parse a multi-line pasted block of links / share texts / CSV rows, deduplicating URLs."""
+    tasks: list[TaskInput] = []
+    seen_urls: set[str] = set()
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        urls_in_line = [_clean_url(m.group(0)) for m in _DOUYIN_URL_RE.finditer(stripped)]
+        if len(urls_in_line) > 1:
+            for u in urls_in_line:
+                if u and u not in seen_urls:
+                    seen_urls.add(u)
+                    tasks.append(
+                        TaskInput(
+                            douyin_url=u,
+                            weibo_name=default_weibo_name,
+                            weibo_uid=default_weibo_uid,
+                            raw_line=u,
+                        )
+                    )
+            continue
+        t = parse_line(stripped)
+        if t and t.douyin_url not in seen_urls:
+            seen_urls.add(t.douyin_url)
+            if not t.weibo_name and default_weibo_name:
+                t.weibo_name = default_weibo_name
+            if not t.weibo_uid and default_weibo_uid:
+                t.weibo_uid = default_weibo_uid
+            tasks.append(t)
+    return tasks
 
 
 def load_tasks_from_file(path: Path) -> list[TaskInput]:

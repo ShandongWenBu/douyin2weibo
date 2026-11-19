@@ -22,7 +22,7 @@ from typing import Any
 from .config import load_config, save_output_dir_to_config
 from .cookie_login import login_and_save_cookie
 from .douyin_fetcher import CaptchaRequiredError
-from .input_parser import TaskInput, parse_line
+from .input_parser import TaskInput, parse_line, parse_text_block
 from .main import _load_ledger, _save_ledger, execute_pipeline
 
 _STATE_LOCK = threading.Lock()
@@ -214,7 +214,15 @@ def _run_worker(payload: dict[str, Any]) -> None:
             cfg.transcode.copy_if_1080p = bool(payload.get("copy_if_1080p"))
 
         tasks: list[TaskInput] = []
-        if payload.get("mode") == "single":
+        run_mode = payload.get("mode") or "paste"
+        if run_mode == "paste":
+            paste_text = str(payload.get("paste_text") or "")
+            def_wb = str(payload.get("default_weibo") or "").strip()
+            def_uid = str(payload.get("default_uid") or "").strip()
+            tasks = parse_text_block(paste_text, default_weibo_name=def_wb, default_weibo_uid=def_uid)
+            if not tasks:
+                raise ValueError("未能从文本框识别到有效的抖音链接，请粘贴 1 条或多条视频链接。")
+        elif run_mode == "single":
             raw = f"{payload.get('single_url', '')}\t{payload.get('single_weibo', '')}\t{payload.get('single_uid', '')}".strip()
             t = parse_line(raw)
             if not t:
@@ -411,11 +419,36 @@ _HTML_PAGE = """<!DOCTYPE html>
 
     <div class="panel" id="runner-panel">
       <div class="tabs">
-        <button class="tab active" id="tab-batch" onclick="switchMode('batch')">批量账号列表</button>
-        <button class="tab" id="tab-single" onclick="switchMode('single')">单条链接搬运</button>
+        <button class="tab active" id="tab-paste" onclick="switchMode('paste')">📋 粘贴视频链接（批量/单条）</button>
+        <button class="tab" id="tab-batch" onclick="switchMode('batch')">📂 固定账号表（待发.txt）</button>
       </div>
 
-      <div id="pane-batch">
+      <div id="pane-paste">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; flex-wrap:wrap; gap:8px;">
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <span style="font-size:13px; color:#334155; font-weight:600;">把找好的抖音单条视频链接一条一行粘贴到这里（支持十几条一起下）：</span>
+            <span id="paste-count-badge" class="pill status-green" style="cursor:default;">已识别 0 条链接</span>
+          </div>
+          <div style="display:flex; gap:6px; flex-wrap:wrap;">
+            <button class="btn btn-soft" onclick="appendFromClipboard()">📋 从剪贴板追加一条</button>
+            <button class="btn" onclick="cleanPasteBox()">🧹 去重整理</button>
+            <button class="btn" onclick="clearPasteBox()">🗑️ 清空</button>
+          </div>
+        </div>
+        <textarea id="paste-links-box" style="min-height:150px;" oninput="updatePasteCount()" placeholder="直接粘贴抖音单条视频链接或分享口令，每行一条（也支持在链接后加空格和目标微博号名）：&#10;https://www.douyin.com/video/7709074754874969386&#10;https://v.douyin.com/xxxxxx/  洛鸢三角洲行动&#10;...可一次贴十几个一起下"></textarea>
+        <div class="row" style="margin-top:8px; margin-bottom:4px;">
+          <label class="field">
+            统一微博号名（可选，留空则按每行指定或自动用抖音作者名）
+            <input type="text" id="paste-default-weibo" placeholder="如果这一批都发同一个微博号，填这里即可" />
+          </label>
+          <label class="field">
+            统一微博 UID（可选，仅查重时需要）
+            <input type="text" id="paste-default-uid" placeholder="留空即可" />
+          </label>
+        </div>
+      </div>
+
+      <div id="pane-batch" style="display:none;">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; flex-wrap:wrap; gap:8px;">
           <div style="font-size:13px; color:#334155; font-weight:600;">勾选要处理的账号（来自 待发.txt）：</div>
           <div style="display:flex; gap:6px;">
@@ -431,23 +464,6 @@ _HTML_PAGE = """<!DOCTYPE html>
             <button class="btn btn-primary" onclick="saveRawTasks()">💾 保存并刷新列表</button>
             <button class="btn" onclick="toggleEditRaw(false)">取消</button>
           </div>
-        </div>
-      </div>
-
-      <div id="pane-single" style="display:none;">
-        <div class="row">
-          <label class="field" style="grid-column: span 2;">
-            抖音链接（作品链接、主页链接或分享口令）
-            <input type="text" id="single-url" placeholder="例如：https://v.douyin.com/heFr3knB71o/" />
-          </label>
-          <label class="field">
-            对应微博号名（可选）
-            <input type="text" id="single-weibo" placeholder="例如：洛鸢三角洲行动" />
-          </label>
-          <label class="field">
-            微博 UID（可选，用于查重）
-            <input type="text" id="single-uid" placeholder="例如：8310157614" />
-          </label>
         </div>
       </div>
 
@@ -550,7 +566,7 @@ _HTML_PAGE = """<!DOCTYPE html>
   <div class="toast" id="toast"></div>
 
   <script>
-    let mode = "batch";
+    let mode = "paste";
     let viewMode = localStorage.getItem("d2w_view_mode") || "card";
     let runnerCollapsed = localStorage.getItem("d2w_runner_collapsed") === "1";
     let stripTagKeywords = ["抖音精选", "上抖音", "来抖音", "抖音小助手", "青年创作者成长计划", "氪金兽"];
@@ -619,10 +635,51 @@ _HTML_PAGE = """<!DOCTYPE html>
     }
     function switchMode(m) {
       mode = m;
+      document.getElementById("tab-paste").classList.toggle("active", m === "paste");
       document.getElementById("tab-batch").classList.toggle("active", m === "batch");
-      document.getElementById("tab-single").classList.toggle("active", m === "single");
+      document.getElementById("pane-paste").style.display = m === "paste" ? "" : "none";
       document.getElementById("pane-batch").style.display = m === "batch" ? "" : "none";
-      document.getElementById("pane-single").style.display = m === "single" ? "" : "none";
+    }
+    function extractDouyinUrlsFromText(txt) {
+      const re = /https?:\\/\\/(?:v\\.douyin\\.com|www\\.douyin\\.com|douyin\\.com|m\\.douyin\\.com|www\\.iesdouyin\\.com)\\/[^\\s,，"'<>]+/g;
+      const matches = String(txt || "").match(re) || [];
+      const seen = new Set();
+      const out = [];
+      for (const raw of matches) {
+        const u = raw.replace(/[.,;，。；"']+$/, "");
+        if (u && !seen.has(u)) { seen.add(u); out.push(u); }
+      }
+      return out;
+    }
+    function updatePasteCount() {
+      const box = document.getElementById("paste-links-box");
+      const urls = extractDouyinUrlsFromText(box.value);
+      const badge = document.getElementById("paste-count-badge");
+      badge.textContent = "已识别 " + urls.length + " 条链接";
+    }
+    async function appendFromClipboard() {
+      try {
+        const clip = (await navigator.clipboard.readText() || "").trim();
+        if (!clip) { showToast("剪贴板为空"); return; }
+        const box = document.getElementById("paste-links-box");
+        const cur = box.value.trim();
+        box.value = cur ? (cur + "\\n" + clip) : clip;
+        updatePasteCount();
+        showToast("已追加到粘贴栏");
+      } catch {
+        showToast("请直接在下方文本框按 Ctrl+V / Cmd+V 粘贴");
+      }
+    }
+    function cleanPasteBox() {
+      const box = document.getElementById("paste-links-box");
+      const urls = extractDouyinUrlsFromText(box.value);
+      box.value = urls.join("\\n");
+      updatePasteCount();
+      showToast("已整理去重，共 " + urls.length + " 条链接");
+    }
+    function clearPasteBox() {
+      document.getElementById("paste-links-box").value = "";
+      updatePasteCount();
     }
     function toggleEditRaw(force) {
       const box = document.getElementById("raw-editor");
@@ -1018,10 +1075,10 @@ _HTML_PAGE = """<!DOCTYPE html>
       }
       const payload = {
         mode,
+        paste_text: document.getElementById("paste-links-box").value,
+        default_weibo: document.getElementById("paste-default-weibo").value.trim(),
+        default_uid: document.getElementById("paste-default-uid").value.trim(),
         selected_lines: selectedLines,
-        single_url: document.getElementById("single-url").value.trim(),
-        single_weibo: document.getElementById("single-weibo").value.trim(),
-        single_uid: document.getElementById("single-uid").value.trim(),
         dedup_preset: document.getElementById("opt-dedup").value,
         lookback_days: Number(document.getElementById("opt-lookback").value),
         latest_per_profile: Number(document.getElementById("opt-latest").value),
