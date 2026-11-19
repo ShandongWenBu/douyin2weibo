@@ -8,10 +8,11 @@ import email.utils
 import json
 import random
 import re
+import threading
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from patchright.async_api import async_playwright
 
@@ -241,6 +242,18 @@ async def _check_weibo_captcha(page) -> None:
         )
 
 
+async def _sleep_interruptible(seconds: float, stop_event: threading.Event | None) -> bool:
+    """Sleep up to `seconds`, waking within 0.25s if stop_event is set. Returns True if stopped."""
+    remaining = max(0.0, seconds)
+    while remaining > 0:
+        if stop_event and stop_event.is_set():
+            return True
+        step = min(0.25, remaining)
+        await asyncio.sleep(step)
+        remaining -= step
+    return bool(stop_event and stop_event.is_set())
+
+
 async def run_weibo_dedup(
     items: list[tuple[DouyinVideo, str, str]],  # (video, target_weibo_name, target_weibo_uid)
     all_known_own_uids: set[str],
@@ -248,6 +261,8 @@ async def run_weibo_dedup(
     ledger_path: Path,
     state_path: Path,
     cfg: DedupConfig,
+    stop_event: threading.Event | None = None,
+    log_fn: Callable[[str], None] | None = None,
 ) -> dict[str, DedupResult]:
     """Check duplicates for each DouyinVideo (keyed by aweme_id)."""
     ledger = _load_json_dict(ledger_path)
@@ -306,6 +321,19 @@ async def run_weibo_dedup(
     if not pending:
         return results
 
+    if stop_event and stop_event.is_set():
+        for video, _, _ in pending:
+            queries = build_search_queries(video, cfg.max_queries_per_video)
+            start_d, end_d, _ = compute_time_window(video, cfg)
+            results[video.aweme_id] = DedupResult(
+                status="manual",
+                label="已跳过查重",
+                summary="已手动停止查重，直接进入下载处理（可点下方链接人工复核）",
+                search_queries=queries,
+                manual_search_urls=make_manual_search_urls(queries, start_d, end_d),
+            )
+        return results
+
     if not weibo_cookie_path.is_file():
         for video, _, _ in pending:
             queries = build_search_queries(video, cfg.max_queries_per_video)
@@ -357,6 +385,16 @@ async def run_weibo_dedup(
                 manual_urls = make_manual_search_urls(queries, start_d, end_d)
                 evidences: list[DedupEvidence] = []
                 red_hit: DedupEvidence | None = None
+
+                if stop_event and stop_event.is_set():
+                    results[video.aweme_id] = DedupResult(
+                        status="manual",
+                        label="已跳过查重",
+                        summary="已手动停止查重，直接进入下载处理（可点下方链接人工复核）",
+                        search_queries=queries,
+                        manual_search_urls=manual_urls,
+                    )
+                    continue
 
                 # Evaluate Layer 2 own timelines (filtered by start_ts)
                 for uid, posts in own_timelines.items():
@@ -414,8 +452,12 @@ async def run_weibo_dedup(
 
                 # Layer 3: Full-site s.weibo.com search with time-range filter, safety quota & delay
                 quota_hit = False
+                stopped_by_user = False
                 ts_param = _build_timescope_param(start_d, end_d)
                 for q in queries:
+                    if stop_event and stop_event.is_set():
+                        stopped_by_user = True
+                        break
                     cache_key = f"video:{start_d}:{end_d}:{q}"
                     cards: list[dict[str, Any]] | None = None
                     if cfg.cache_same_day and cache_key in (state.get("cache") or {}):
@@ -426,14 +468,23 @@ async def run_weibo_dedup(
                             break
                         if search_performed_this_run > 0:
                             delay = random.uniform(cfg.min_delay_sec, cfg.max_delay_sec)
-                            await asyncio.sleep(delay)
+                            if log_fn:
+                                log_fn(f"  [查重] 安全等待 {delay:.1f}s 后继续搜索（可点「停止查重」直接开始下载）...")
+                            if await _sleep_interruptible(delay, stop_event):
+                                stopped_by_user = True
+                                break
 
+                        if stop_event and stop_event.is_set():
+                            stopped_by_user = True
+                            break
                         search_url = (
                             f"https://s.weibo.com/video?q={urllib.parse.quote(q)}"
                             f"&timescope={ts_param}&Refer=g"
                         )
                         await search_page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-                        await search_page.wait_for_timeout(1800)
+                        if await _sleep_interruptible(1.8, stop_event):
+                            stopped_by_user = True
+                            break
                         await _check_weibo_captcha(search_page)
                         search_performed_this_run += 1
                         state["search_count"] = int(state.get("search_count", 0)) + 1
@@ -513,6 +564,14 @@ async def run_weibo_dedup(
                         search_queries=queries,
                         manual_search_urls=manual_urls,
                         quota_exceeded=quota_hit,
+                    )
+                elif stopped_by_user:
+                    results[video.aweme_id] = DedupResult(
+                        status="manual",
+                        label="已跳过查重",
+                        summary="已手动停止查重，直接进入下载处理（可点下方链接人工复核）",
+                        search_queries=queries,
+                        manual_search_urls=manual_urls,
                     )
                 elif quota_hit:
                     results[video.aweme_id] = DedupResult(

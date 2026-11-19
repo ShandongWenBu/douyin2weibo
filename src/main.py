@@ -7,6 +7,7 @@ import asyncio
 import datetime
 import json
 import sys
+import threading
 import webbrowser
 from dataclasses import asdict
 from pathlib import Path
@@ -112,11 +113,15 @@ async def execute_pipeline(
     force_download: bool = False,
     overwrite: bool = False,
     log_fn: Callable[[str], None] = print,
+    stop_dedup_event: threading.Event | None = None,
+    phase_fn: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Run Douyin fetch -> Weibo dedup -> download & 1080P transcode -> 工作台.html."""
     if not tasks:
         raise ValueError("没有找到需要处理的任务。")
 
+    if phase_fn:
+        phase_fn("fetching")
     log_fn(f"共读取到 {len(tasks)} 条输入任务，开始解析抖音作品信息...")
 
     unique_urls = list(dict.fromkeys(t.douyin_url for t in tasks))
@@ -156,6 +161,8 @@ async def execute_pipeline(
             "workbench_path": str(cfg.project_root / "工作台.html"),
         }
 
+    if phase_fn:
+        phase_fn("dedup")
     log_fn(f"\n开始微博查重（模式：{cfg.dedup.mode}，全站搜：{'开' if cfg.dedup.enable_global_search else '关'}，每日上限：{cfg.dedup.daily_search_limit}）...")
     all_own_uids = {t.weibo_uid for t in tasks if t.weibo_uid}
     dedup_inputs = [(vid, task.weibo_name, task.weibo_uid) for task, vid in expanded_items]
@@ -166,7 +173,12 @@ async def execute_pipeline(
         ledger_path=cfg.ledger_path,
         state_path=cfg.dedup_state_path,
         cfg=cfg.dedup,
+        stop_event=stop_dedup_event,
+        log_fn=log_fn,
     )
+
+    if phase_fn:
+        phase_fn("downloading")
 
     for task, vid in expanded_items:
         dr = dedup_map.get(vid.aweme_id)

@@ -26,9 +26,11 @@ from .input_parser import TaskInput, parse_line, parse_text_block
 from .main import _load_ledger, _save_ledger, execute_pipeline
 
 _STATE_LOCK = threading.Lock()
+_STOP_DEDUP_EVENT = threading.Event()
 _SERVER_REF: dict[str, Any] = {"server": None, "port": 8765}
 _APP_STATE: dict[str, Any] = {
     "running": False,
+    "phase": "idle",
     "logs": [],
     "cards": [],
     "failures": [],
@@ -237,6 +239,10 @@ def _run_worker(payload: dict[str, Any]) -> None:
             if not tasks:
                 raise ValueError("请至少勾选或填写 1 条有效账号/链接。")
 
+        def _set_phase(ph: str) -> None:
+            with _STATE_LOCK:
+                _APP_STATE["phase"] = ph
+
         res = asyncio.run(
             execute_pipeline(
                 cfg,
@@ -245,6 +251,8 @@ def _run_worker(payload: dict[str, Any]) -> None:
                 force_download=bool(payload.get("force_download", False)),
                 overwrite=bool(payload.get("overwrite", False)),
                 log_fn=_append_log,
+                stop_dedup_event=_STOP_DEDUP_EVENT,
+                phase_fn=_set_phase,
             )
         )
         today_str = datetime.date.today().isoformat()
@@ -270,8 +278,10 @@ def _run_worker(payload: dict[str, Any]) -> None:
         with _STATE_LOCK:
             _APP_STATE["failures"] = [{"url": "-", "weibo_name": "运行错误", "error": str(exc)}]
     finally:
+        _STOP_DEDUP_EVENT.clear()
         with _STATE_LOCK:
             _APP_STATE["running"] = False
+            _APP_STATE["phase"] = "idle"
 
 
 _HTML_PAGE = """<!DOCTYPE html>
@@ -517,7 +527,10 @@ _HTML_PAGE = """<!DOCTYPE html>
             <input type="checkbox" id="opt-overwrite" /> 强制重新转码覆盖
           </label>
         </div>
-        <button class="btn btn-primary btn-lg" id="btn-run" onclick="startRun()">🚀 开始处理</button>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <button class="btn btn-lg" id="btn-stop-dedup" style="display:none; background:#fff7ed; border-color:#fdba74; color:#c2410c;" onclick="stopDedup()">⏭️ 停止查重并直接处理</button>
+          <button class="btn btn-primary btn-lg" id="btn-run" onclick="startRun()">🚀 开始处理</button>
+        </div>
       </div>
 
       <div class="log-box" id="log-box">就绪。如果只需找已下载的视频去创作罐头上传，直接看下方列表即可。</div>
@@ -1095,7 +1108,19 @@ _HTML_PAGE = """<!DOCTYPE html>
       if (!r.ok) { showToast(d.error || "启动失败"); return; }
       document.getElementById("btn-run").disabled = true;
       document.getElementById("btn-run").textContent = "⏳ 正在处理...";
+      const stopBtn = document.getElementById("btn-stop-dedup");
+      stopBtn.disabled = false;
+      stopBtn.textContent = "⏭️ 停止查重并直接处理";
+      stopBtn.style.display = "inline-flex";
       startPolling();
+    }
+
+    async function stopDedup() {
+      const stopBtn = document.getElementById("btn-stop-dedup");
+      stopBtn.disabled = true;
+      stopBtn.textContent = "⏳ 正在跳过查重...";
+      const r = await fetch("/api/stop-dedup", { method: "POST", headers: {"Content-Type": "application/json"}, body: "{}" });
+      if (r.ok) showToast("已停止查重，马上进入下载与 1080P 转码");
     }
 
     function startPolling() {
@@ -1114,6 +1139,9 @@ _HTML_PAGE = """<!DOCTYPE html>
         }
         failuresData = st.failures || [];
         renderCards();
+        const stopBtn = document.getElementById("btn-stop-dedup");
+        const canStopDedup = st.running && (st.phase === "fetching" || st.phase === "dedup");
+        stopBtn.style.display = canStopDedup ? "inline-flex" : "none";
         if (!st.running) {
           clearInterval(pollTimer);
           document.getElementById("btn-run").disabled = false;
@@ -1335,12 +1363,25 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 if _APP_STATE["running"]:
                     self._send_json({"error": "当前已有任务在运行中"}, status=409)
                     return
+                _STOP_DEDUP_EVENT.clear()
                 _APP_STATE["running"] = True
+                _APP_STATE["phase"] = "fetching"
                 _APP_STATE["logs"] = ["已启动处理任务..."]
                 _APP_STATE["failures"] = []
                 _APP_STATE["summary"] = None
             th = threading.Thread(target=_run_worker, args=(body,), daemon=True)
             th.start()
+            self._send_json({"ok": True})
+            return
+
+        if parsed.path == "/api/stop-dedup":
+            with _STATE_LOCK:
+                running = _APP_STATE["running"]
+            if not running:
+                self._send_json({"ok": True, "message": "当前没有正在运行的任务"})
+                return
+            _STOP_DEDUP_EVENT.set()
+            _append_log("收到指令：停止剩余微博查重，马上直接进入下载与转码...")
             self._send_json({"ok": True})
             return
 
