@@ -29,7 +29,8 @@ latest_per_profile: 1
 # 视频与封面转码参数
 transcode:
   crf: 18
-  preset: "slow"
+  preset: "medium"
+  copy_if_1080p: true
   audio_bitrate: "192k"
   upscale_sharpen: "unsharp=5:5:0.4:5:5:0.0"
   downscale_sharpen: "unsharp=3:3:0.25:3:3:0.0"

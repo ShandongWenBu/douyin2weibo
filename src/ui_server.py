@@ -199,7 +199,19 @@ def _run_worker(payload: dict[str, Any]) -> None:
 
         cfg.dedup.lookback_days = int(payload.get("lookback_days", 30))
         cfg.latest_per_profile = max(1, int(payload.get("latest_per_profile", 1)))
-        cfg.transcode.crf = int(payload.get("crf", 18))
+        tc_profile = str(payload.get("transcode_profile") or "")
+        if tc_profile == "medium_18":
+            cfg.transcode.preset, cfg.transcode.crf = "medium", 18
+        elif tc_profile == "fast_19":
+            cfg.transcode.preset, cfg.transcode.crf = "fast", 19
+        elif tc_profile == "medium_20":
+            cfg.transcode.preset, cfg.transcode.crf = "medium", 20
+        elif tc_profile == "slow_18":
+            cfg.transcode.preset, cfg.transcode.crf = "slow", 18
+        elif "crf" in payload:
+            cfg.transcode.crf = int(payload.get("crf", 18))
+        if "copy_if_1080p" in payload:
+            cfg.transcode.copy_if_1080p = bool(payload.get("copy_if_1080p"))
 
         tasks: list[TaskInput] = []
         if payload.get("mode") == "single":
@@ -467,16 +479,21 @@ _HTML_PAGE = """<!DOCTYPE html>
           </select>
         </label>
         <label class="field">
-          1080P 画质
-          <select id="opt-crf">
-            <option value="18" selected>超清原画级（CRF 18）</option>
-            <option value="20">均衡省体积（CRF 20）</option>
+          1080P 转码速度与画质
+          <select id="opt-transcode-profile">
+            <option value="medium_18" selected>⚡ 均衡高速（CRF 18 · medium，推荐）</option>
+            <option value="fast_19">🚀 极速省时（CRF 19 · fast）</option>
+            <option value="medium_20">💾 省体积高速（CRF 20 · medium）</option>
+            <option value="slow_18">🎞️ 精压慢速（CRF 18 · slow）</option>
           </select>
         </label>
       </div>
 
       <div class="actions-bar">
         <div style="display:flex; gap:14px; flex-wrap:wrap; font-size:13px;">
+          <label style="display:inline-flex; align-items:center; gap:5px; cursor:pointer;">
+            <input type="checkbox" id="opt-copy-1080p" checked /> 源片已是 1080P H.264 时直接秒封装（免重编码）
+          </label>
           <label style="display:inline-flex; align-items:center; gap:5px; cursor:pointer;">
             <input type="checkbox" id="opt-dedup-only" /> 仅查重不下载
           </label>
@@ -1008,7 +1025,8 @@ _HTML_PAGE = """<!DOCTYPE html>
         dedup_preset: document.getElementById("opt-dedup").value,
         lookback_days: Number(document.getElementById("opt-lookback").value),
         latest_per_profile: Number(document.getElementById("opt-latest").value),
-        crf: Number(document.getElementById("opt-crf").value),
+        transcode_profile: document.getElementById("opt-transcode-profile").value,
+        copy_if_1080p: document.getElementById("opt-copy-1080p").checked,
         dedup_only: document.getElementById("opt-dedup-only").checked,
         overwrite: document.getElementById("opt-overwrite").checked,
       };

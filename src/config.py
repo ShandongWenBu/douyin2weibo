@@ -25,7 +25,8 @@ _HASHTAG_RE = re.compile(r"#([^\s#]+)")
 @dataclass
 class TranscodeConfig:
     crf: int = 18
-    preset: str = "slow"
+    preset: str = "medium"
+    copy_if_1080p: bool = True
     audio_bitrate: str = "192k"
     upscale_sharpen: str = "unsharp=5:5:0.4:5:5:0.0"
     downscale_sharpen: str = "unsharp=3:3:0.25:3:3:0.0"
@@ -104,7 +105,8 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     tc_raw = raw.get("transcode") or {}
     transcode = TranscodeConfig(
         crf=int(tc_raw.get("crf", 18)),
-        preset=str(tc_raw.get("preset", "slow")),
+        preset=str(tc_raw.get("preset", "medium")),
+        copy_if_1080p=bool(tc_raw.get("copy_if_1080p", True)),
         audio_bitrate=str(tc_raw.get("audio_bitrate", "192k")),
         upscale_sharpen=str(tc_raw.get("upscale_sharpen", "unsharp=5:5:0.4:5:5:0.0")),
         downscale_sharpen=str(tc_raw.get("downscale_sharpen", "unsharp=3:3:0.25:3:3:0.0")),

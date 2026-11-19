@@ -57,29 +57,43 @@ def transcode_to_1080p(
     dst_video: Path,
     cfg: TranscodeConfig,
 ) -> ProbeInfo:
-    """Transcode source video to crisp 1080P H.264 MP4 (portrait width=1080, landscape height=1080)."""
+    """Transcode source video to crisp 1080P H.264 MP4 (or fast-remux if already 1080P H.264)."""
     info = probe_video(ffprobe_path, src_video)
     is_portrait = info.height > info.width
     short_side = min(info.width, info.height)
 
-    scale_expr = "scale=1080:-2:flags=lanczos" if is_portrait else "scale=-2:1080:flags=lanczos"
-    sharpen = cfg.upscale_sharpen if short_side < 1080 else cfg.downscale_sharpen
-    vf = f"{scale_expr},{sharpen}" if sharpen else scale_expr
-
     dst_video.parent.mkdir(parents=True, exist_ok=True)
     tmp_dst = dst_video.with_suffix(".tmp.mp4")
 
-    cmd = [
-        ffmpeg_path,
-        "-y",
-        "-i", str(src_video),
-        "-vf", vf,
-        "-c:v", "libx264",
-        "-pix_fmt", "yuv420p",
-        "-crf", str(cfg.crf),
-        "-preset", cfg.preset,
-        "-movflags", "+faststart",
-    ]
+    can_fast_copy = (
+        cfg.copy_if_1080p
+        and short_side == 1080
+        and info.video_codec.lower() == "h264"
+    )
+    if can_fast_copy:
+        cmd = [
+            ffmpeg_path,
+            "-y",
+            "-i", str(src_video),
+            "-c:v", "copy",
+            "-movflags", "+faststart",
+        ]
+    else:
+        scale_expr = "scale=1080:-2:flags=lanczos" if is_portrait else "scale=-2:1080:flags=lanczos"
+        sharpen = cfg.upscale_sharpen if short_side < 1080 else cfg.downscale_sharpen
+        vf = f"{scale_expr},{sharpen}" if sharpen else scale_expr
+        cmd = [
+            ffmpeg_path,
+            "-y",
+            "-i", str(src_video),
+            "-vf", vf,
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-crf", str(cfg.crf),
+            "-preset", cfg.preset,
+            "-movflags", "+faststart",
+        ]
+
     if info.audio_codec:
         if info.audio_codec.lower() in {"aac", "mp3"}:
             cmd.extend(["-c:a", "copy"])
