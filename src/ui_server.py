@@ -445,7 +445,7 @@ _HTML_PAGE = """<!DOCTYPE html>
             <button class="btn" onclick="clearPasteBox()">🗑️ 清空</button>
           </div>
         </div>
-        <textarea id="paste-links-box" style="min-height:150px;" oninput="updatePasteCount()" placeholder="直接粘贴抖音单条视频链接或分享口令，每行一条（也支持在链接后加空格和目标微博号名）：&#10;https://www.douyin.com/video/7709074754874969386&#10;https://v.douyin.com/xxxxxx/  洛鸢三角洲行动&#10;...可一次贴十几个一起下"></textarea>
+        <textarea id="paste-links-box" style="min-height:150px;" oninput="updatePasteCount()" placeholder="直接粘贴抖音单条视频链接或分享口令，每行一条（也支持在链接后加空格和目标微博号名）：&#10;https://www.douyin.com/video/1234567890123456789&#10;https://v.douyin.com/xxxxxx/  示例微博号&#10;...可一次贴十几个一起下"></textarea>
         <div class="row" style="margin-top:8px; margin-bottom:4px;">
           <label class="field">
             统一微博号名（可选，留空则按每行指定或自动用抖音作者名）
