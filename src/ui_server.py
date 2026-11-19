@@ -147,10 +147,17 @@ def _open_native_path(folder_path: Path, select_file: Path | None = None) -> Non
         else:
             subprocess.Popen(["open", str(folder_path)])
     elif sys.platform.startswith("win"):
+        # Windows 上 explorer 的 /select, 必须写成 /select,"<完整路径>"（前缀 /select, 留在引号外），
+        # 否则 subprocess.list2cmdline 会对含空格参数整体加引号，导致 explorer 回落打开「文档」目录。
+        folder_str = str(folder_path)
+        if len(folder_str) > 3:
+            folder_str = folder_str.rstrip("\\")
         if select_file and select_file.is_file():
-            subprocess.Popen(["explorer", f"/select,{select_file}"])
+            file_str = str(select_file).replace('"', "")
+            subprocess.Popen(f'explorer /select,"{file_str}"')
         else:
-            subprocess.Popen(["explorer", str(folder_path)])
+            folder_str = folder_str.replace('"', "")
+            subprocess.Popen(f'explorer "{folder_str}"')
     else:
         subprocess.Popen(["xdg-open", str(folder_path)])
 
