@@ -8,6 +8,7 @@ import datetime
 import json
 import mimetypes
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -33,9 +34,53 @@ _APP_STATE: dict[str, Any] = {
     "phase": "idle",
     "logs": [],
     "cards": [],
+    "session_cards": [],
     "failures": [],
     "summary": None,
 }
+
+
+def _normalize_day(raw: str) -> str:
+    m = re.match(r"^(\d{4}-\d{2}-\d{2})", str(raw or "").strip())
+    return m.group(1) if m else str(raw or "").strip()
+
+
+def _merge_cards(session_cards: list[dict[str, Any]], disk_cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Combine disk-persisted cards with current-session cards so earlier videos of the same day never disappear."""
+    cfg = load_config()
+    ledger_videos = (_load_ledger(cfg.ledger_path).get("videos") or {})
+    merged: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, str]] = set()
+
+    for src_list in (disk_cards, session_cards):
+        for raw_c in src_list:
+            c = dict(raw_c)
+            day = _normalize_day(c.get("date_str") or "")
+            if not day and c.get("package_dir"):
+                day = _normalize_day(Path(str(c["package_dir"])).parent.name)
+            c["date_str"] = day or datetime.date.today().isoformat()
+            aid = str(c.get("aweme_id") or "")
+            key = (aid, c["date_str"]) if aid else (str(c.get("package_dir") or c.get("title") or ""), c["date_str"])
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            if aid and aid in ledger_videos:
+                c["published"] = bool((ledger_videos.get(aid) or {}).get("published", False))
+            merged.append(c)
+
+    merged.sort(key=lambda x: (x.get("date_str") or "", 0 if not x.get("published") else 1), reverse=False)
+    # Keep newest date first; within the same date keep unpublished first, preserving newest-first order
+    by_day: dict[str, list[dict[str, Any]]] = {}
+    for c in merged:
+        by_day.setdefault(c.get("date_str") or "", []).append(c)
+    ordered: list[dict[str, Any]] = []
+    for day in sorted(by_day.keys(), reverse=True):
+        day_items = by_day[day]
+        unpub = [x for x in day_items if not x.get("published")]
+        pub = [x for x in day_items if x.get("published")]
+        ordered.extend(unpub)
+        ordered.extend(pub)
+    return ordered
 
 
 def _load_existing_cards() -> list[dict[str, Any]]:
@@ -46,13 +91,13 @@ def _load_existing_cards() -> list[dict[str, Any]]:
     if not cfg.output_dir.is_dir():
         return cards
     meta_files = sorted(cfg.output_dir.glob("*/*/meta.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-    for mf in meta_files[:120]:
+    for mf in meta_files[:200]:
         try:
             meta = json.loads(mf.read_text(encoding="utf-8"))
         except Exception:
             continue
         pkg_dir = mf.parent
-        date_dir = pkg_dir.parent.name
+        date_day = _normalize_day(pkg_dir.parent.name)
         cover_path = pkg_dir / "cover.jpg"
         video_path = pkg_dir / "video_1080p.mp4"
         aweme_id = str(meta.get("aweme_id") or "")
@@ -63,7 +108,7 @@ def _load_existing_cards() -> list[dict[str, Any]]:
         is_pub = bool((videos_ledger.get(aweme_id) or {}).get("published", False))
         cards.append({
             "aweme_id": aweme_id,
-            "date_str": date_dir,
+            "date_str": date_day,
             "weibo_name": meta.get("weibo_name") or meta.get("author") or "",
             "weibo_uid": meta.get("weibo_uid") or "",
             "author": meta.get("author") or "",
@@ -257,9 +302,15 @@ def _run_worker(payload: dict[str, Any]) -> None:
         )
         today_str = datetime.date.today().isoformat()
         for c in res["cards"]:
-            c.setdefault("date_str", today_str)
+            c["date_str"] = _normalize_day(c.get("date_str") or today_str)
+        disk_cards = _load_existing_cards()
         with _STATE_LOCK:
-            _APP_STATE["cards"] = res["cards"]
+            prev_session = list(_APP_STATE.get("session_cards") or [])
+            # Keep current-run cards + previous session non-disk cards (e.g. skipped/dedup-only), merged with all disk cards
+            new_session = res["cards"] + [x for x in prev_session if not x.get("package_dir")]
+            merged_cards = _merge_cards(new_session, disk_cards)
+            _APP_STATE["session_cards"] = new_session[:100]
+            _APP_STATE["cards"] = merged_cards
             _APP_STATE["failures"] = res["failures"]
             _APP_STATE["summary"] = {
                 "success_count": res["success_count"],
@@ -880,6 +931,7 @@ _HTML_PAGE = """<!DOCTYPE html>
       });
       const c = cardsData.find(x => x.aweme_id === awemeId);
       if (c) c.published = nextState;
+      refreshDateOptions();
       renderCards();
     }
     function fmtDur(sec) {
@@ -892,9 +944,17 @@ _HTML_PAGE = """<!DOCTYPE html>
     function refreshDateOptions() {
       const sel = document.getElementById("date-filter");
       const prev = sel.value || "all";
-      const dates = Array.from(new Set(cardsData.map(c => c.date_str).filter(Boolean))).sort().reverse();
-      sel.innerHTML = `<option value="all">全部日期（${cardsData.length}）</option>` +
-        dates.map(d => `<option value="${esc(d)}">${esc(d)}</option>`).join("");
+      const statsByDay = {};
+      for (const c of cardsData) {
+        const d = c.date_str || "";
+        if (!d) continue;
+        if (!statsByDay[d]) statsByDay[d] = { total: 0, unpub: 0 };
+        statsByDay[d].total++;
+        if (!c.published) statsByDay[d].unpub++;
+      }
+      const dates = Object.keys(statsByDay).sort().reverse();
+      sel.innerHTML = `<option value="all">全部日期（共 ${cardsData.length} 条）</option>` +
+        dates.map(d => `<option value="${esc(d)}">${esc(d)}（共 ${statsByDay[d].total} 条 · 待发 ${statsByDay[d].unpub}）</option>`).join("");
       if (dates.includes(prev) || prev === "all") sel.value = prev;
     }
     function renderCards() {
@@ -1263,9 +1323,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                         "douyin_name": t.douyin_name,
                         "raw_line": t.raw_line,
                     })
+            disk_cards = _load_existing_cards()
             with _STATE_LOCK:
                 running = _APP_STATE["running"]
-                cards = _APP_STATE["cards"] or _load_existing_cards()
+                session_cards = list(_APP_STATE.get("session_cards") or [])
+                cards = _merge_cards(session_cards, disk_cards)
+                _APP_STATE["cards"] = cards
             self._send_json({
                 "output_dir": str(cfg.output_dir),
                 "strip_tag_keywords": cfg.strip_tag_keywords,
@@ -1411,6 +1474,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             with _STATE_LOCK:
                 if not _APP_STATE["running"]:
                     _APP_STATE["cards"] = []
+                    _APP_STATE["session_cards"] = []
             self._send_json({"ok": True, "output_dir": str(resolved), "cards": _load_existing_cards()})
             return
 
@@ -1429,6 +1493,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             with _STATE_LOCK:
                 if not _APP_STATE["running"]:
                     _APP_STATE["cards"] = []
+                    _APP_STATE["session_cards"] = []
             self._send_json({"ok": True, "output_dir": str(resolved), "cards": _load_existing_cards()})
             return
 
