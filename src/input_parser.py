@@ -12,7 +12,8 @@ _DOUYIN_URL_RE = re.compile(
     r"https?://(?:v\.douyin\.com|www\.douyin\.com|douyin\.com|m\.douyin\.com|www\.iesdouyin\.com)/[^\s,，\"'<>]+"
 )
 _WEIBO_UID_RE = re.compile(r"weibo\.com/(?:u/)?(\d{5,})")
-_SHARE_NOISE_MARKERS = ("复制打开抖音", "复制此链接", "打开Dou音", "长按复制", ":/")
+_SHARE_NOISE_MARKERS = ("复制打开抖音", "复制此链接", "打开Dou音", "长按复制")
+_SHARE_CODE_TAIL_RE = re.compile(r"\s[A-Za-z0-9@._\-]{2,}:/\s*$")
 
 
 @dataclass
@@ -48,7 +49,7 @@ def parse_line(line: str) -> TaskInput | None:
         return None
 
     # Try CSV format only when line looks like a real CSV row (has weibo URL or >= 2 commas, not share text)
-    is_share_blob = any(m in stripped for m in _SHARE_NOISE_MARKERS)
+    is_share_blob = any(m in stripped for m in _SHARE_NOISE_MARKERS) or bool(_SHARE_CODE_TAIL_RE.search(stripped))
     if not is_share_blob and (stripped.count(",") >= 2 or ("," in stripped and "weibo.com" in stripped)) and _DOUYIN_URL_RE.search(stripped):
         row = next(csv.reader(io.StringIO(stripped)))
         douyin_url = ""
