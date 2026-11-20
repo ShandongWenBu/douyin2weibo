@@ -162,6 +162,42 @@ def _open_native_path(folder_path: Path, select_file: Path | None = None) -> Non
         subprocess.Popen(["xdg-open", str(folder_path)])
 
 
+def _resolve_live_package_dir(output_dir: Path, pkg_dir: Path, aweme_id: str = "") -> Path | None:
+    """Resolve a package directory even if its parent date folder was renamed (e.g. 共12个 -> 共37个)."""
+    out_root = output_dir.resolve()
+    try:
+        pkg_dir.resolve().relative_to(out_root)
+    except ValueError:
+        return None
+
+    if pkg_dir.is_dir():
+        return pkg_dir.resolve()
+
+    if not out_root.is_dir():
+        return None
+
+    # 1. Check sibling date folders sharing the same YYYY-MM-DD prefix
+    day = _normalize_day(pkg_dir.parent.name)
+    if day and re.match(r"^\d{4}-\d{2}-\d{2}$", day):
+        for date_child in sorted(out_root.iterdir()):
+            if date_child.is_dir() and (date_child.name == day or date_child.name.startswith(f"{day}_")):
+                cand = date_child / pkg_dir.name
+                if cand.is_dir():
+                    return cand.resolve()
+
+    # 2. Fallback: locate by aweme_id across meta.json files inside output_dir
+    if aweme_id:
+        for mf in out_root.glob("*/*/meta.json"):
+            try:
+                meta = json.loads(mf.read_text(encoding="utf-8"))
+                if str(meta.get("aweme_id") or "") == aweme_id:
+                    return mf.parent.resolve()
+            except Exception:
+                continue
+
+    return None
+
+
 def _pick_native_folder(initial_dir: Path) -> str | None:
     """Open OS native folder chooser dialog and return selected path, or None if cancelled."""
     if sys.platform == "darwin":
@@ -801,12 +837,30 @@ _HTML_PAGE = """<!DOCTYPE html>
       }
       showToast(label + " 已复制");
     }
-    async function openPath(packageDir, selectFile) {
-      await fetch("/api/open-folder", {
-        method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({ package_dir: packageDir, select_file: selectFile || "" })
-      });
-      showToast("已在访达/文件夹中为你定位");
+    async function openPath(packageDir, selectFile, awemeId) {
+      try {
+        const r = await fetch("/api/open-folder", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ package_dir: packageDir, select_file: selectFile || "", aweme_id: awemeId || "" })
+        });
+        const d = await r.json();
+        if (!r.ok) {
+          showToast("⚠️ " + (d.error || "目录不存在，请刷新页面"));
+          return;
+        }
+        if (d.package_dir && d.package_dir !== packageDir) {
+          const c = cardsData.find(x => (awemeId && x.aweme_id === awemeId) || x.package_dir === packageDir);
+          if (c) {
+            c.package_dir = d.package_dir;
+            if (d.video_path !== undefined) c.video_path = d.video_path;
+            if (d.cover_path !== undefined) c.cover_path = d.cover_path;
+            renderCards();
+          }
+        }
+        showToast("已在访达/文件夹中为你定位");
+      } catch (e) {
+        showToast("⚠️ 打开失败：" + String(e));
+      }
     }
     function toggleEditOutputDir(force) {
       const box = document.getElementById("output-dir-editor");
@@ -1038,8 +1092,8 @@ _HTML_PAGE = """<!DOCTYPE html>
                       </td>
                       <td>
                         <div style="display:flex;gap:5px;flex-wrap:wrap;">
-                          ${c.video_path ? `<button class="btn btn-primary" onclick='openPath(${JSON.stringify(c.package_dir)}, ${JSON.stringify(c.video_path)})'>📁 定位视频</button>` : ""}
-                          ${c.cover_path ? `<button class="btn" onclick='openPath(${JSON.stringify(c.package_dir)}, ${JSON.stringify(c.cover_path)})'>🖼 封面</button>` : ""}
+                          ${c.video_path ? `<button class="btn btn-primary" onclick='openPath(${JSON.stringify(c.package_dir)}, ${JSON.stringify(c.video_path)}, ${JSON.stringify(c.aweme_id)})'>📁 定位视频</button>` : ""}
+                          ${c.cover_path ? `<button class="btn" onclick='openPath(${JSON.stringify(c.package_dir)}, ${JSON.stringify(c.cover_path)}, ${JSON.stringify(c.aweme_id)})'>🖼 封面</button>` : ""}
                           ${c.video_path ? `<button class="btn btn-soft" onclick='copyText(${JSON.stringify(c.video_path)}, "视频路径", this)'>📋 视频路径</button>` : ""}
                           ${c.video_path ? `<button class="btn" onclick='openPreview(${JSON.stringify(c.video_path)}, ${JSON.stringify(c.title)})'>▶</button>` : ""}
                         </div>
@@ -1095,8 +1149,8 @@ _HTML_PAGE = """<!DOCTYPE html>
                   <div class="file-bar">
                     <div class="file-path-hint">📂 ${esc(shortFolder)}</div>
                     <div class="file-btns">
-                      ${c.video_path ? `<button class="btn btn-primary" onclick='openPath(${JSON.stringify(c.package_dir)}, ${JSON.stringify(c.video_path)})'>📁 定位视频</button>` : ""}
-                      ${c.cover_path ? `<button class="btn" onclick='openPath(${JSON.stringify(c.package_dir)}, ${JSON.stringify(c.cover_path)})'>🖼 定位封面</button>` : ""}
+                      ${c.video_path ? `<button class="btn btn-primary" onclick='openPath(${JSON.stringify(c.package_dir)}, ${JSON.stringify(c.video_path)}, ${JSON.stringify(c.aweme_id)})'>📁 定位视频</button>` : ""}
+                      ${c.cover_path ? `<button class="btn" onclick='openPath(${JSON.stringify(c.package_dir)}, ${JSON.stringify(c.cover_path)}, ${JSON.stringify(c.aweme_id)})'>🖼 定位封面</button>` : ""}
                       ${c.video_path ? `<button class="btn btn-soft" onclick='copyText(${JSON.stringify(c.video_path)}, "视频路径", this)'>📋 复制视频路径</button>` : ""}
                       <button class="btn" onclick='copyText(${JSON.stringify(c.package_dir)}, "文件夹路径", this)'>📁 复制目录</button>
                     </div>
@@ -1361,8 +1415,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self.send_error(HTTPStatus.FORBIDDEN)
                 return
             if not req_path.is_file():
-                self.send_error(HTTPStatus.NOT_FOUND)
-                return
+                live_dir = _resolve_live_package_dir(cfg.output_dir, req_path.parent)
+                if live_dir and (live_dir / req_path.name).is_file():
+                    req_path = (live_dir / req_path.name).resolve()
+                else:
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
             mime, _ = mimetypes.guess_type(str(req_path))
             file_size = req_path.stat().st_size
             range_hdr = self.headers.get("Range")
@@ -1577,14 +1635,29 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             pkg_dir = Path(str(body.get("package_dir") or "")).resolve()
             sel_raw = str(body.get("select_file") or body.get("video_path") or "")
             sel_path = Path(sel_raw).resolve() if sel_raw else None
+            aweme_id = str(body.get("aweme_id") or "")
             try:
                 pkg_dir.relative_to(cfg.output_dir.resolve())
             except ValueError:
                 self._send_json({"error": "非法路径"}, status=403)
                 return
-            if pkg_dir.is_dir():
-                _open_native_path(pkg_dir, sel_path)
-            self._send_json({"ok": True})
+            live_dir = _resolve_live_package_dir(cfg.output_dir, pkg_dir, aweme_id=aweme_id)
+            if not live_dir or not live_dir.is_dir():
+                self._send_json(
+                    {"error": f"目录不存在（可能已被移动或删除）：{pkg_dir.name}，请刷新页面"},
+                    status=404,
+                )
+                return
+            live_sel = (live_dir / sel_path.name) if sel_path else None
+            _open_native_path(live_dir, live_sel)
+            live_video = live_dir / "video_1080p.mp4"
+            live_cover = live_dir / "cover.jpg"
+            self._send_json({
+                "ok": True,
+                "package_dir": str(live_dir),
+                "video_path": str(live_video) if live_video.is_file() else "",
+                "cover_path": str(live_cover) if live_cover.is_file() else "",
+            })
             return
 
         if parsed.path == "/api/toggle-published":
