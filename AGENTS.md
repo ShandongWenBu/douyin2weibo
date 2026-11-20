@@ -17,7 +17,7 @@
 | 微博查重（台账 / 自家主页 `mymblog` / `s.weibo.com` 时间窗） | `src/weibo_dedup.py` | `compute_time_window()`, `build_search_queries()`, `run_weibo_dedup()` |
 | 视频 1080P 转码与封面压缩 | `src/media_processor.py` | `probe_video()`, `transcode_to_1080p()`, `process_cover_to_jpg()` |
 | 配置读取、Windows 文件名合法化 | `src/config.py` | `load_config()`, `sanitize_filename()`, `extract_title_and_hashtags()` |
-| 主流程编排、桌面日期归档（`YYYY-MM-DD_共N个`） | `src/main.py` | `execute_pipeline()`, `_get_or_create_date_dir()`, `_finalize_date_dir_count()` |
+| 主流程编排、桌面日期归档（固定 `YYYY-MM-DD` 目录） | `src/main.py` | `execute_pipeline()`, `_get_or_create_date_dir()` |
 
 ## 3. 跨平台与安全红线（修改必守）
 1. **Mac / Windows 双端兼容**：

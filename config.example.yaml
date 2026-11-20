@@ -9,7 +9,7 @@ weibo_cookie_path: "cookies/weibo_weibo-creator.json"
 ffmpeg_path: ""
 ffprobe_path: ""
 
-# 输出目录与本地台账（默认直接放到桌面，按 YYYY-MM-DD_共N个 归档）
+# 输出目录与本地台账（默认放到桌面，按固定日期目录 YYYY-MM-DD 归档，不动态改名）
 output_dir: "~/Desktop/微博待发视频"
 ledger_path: "ledger.json"
 

@@ -8,7 +8,6 @@ import datetime
 import json
 import sys
 import threading
-import time
 import webbrowser
 from dataclasses import asdict
 from pathlib import Path
@@ -46,43 +45,10 @@ def _save_ledger(path: Path, ledger: dict[str, Any]) -> None:
 
 
 def _get_or_create_date_dir(output_root: Path, date_str: str) -> Path:
-    output_root.mkdir(parents=True, exist_ok=True)
-    for child in sorted(output_root.iterdir()):
-        if child.is_dir() and (child.name == date_str or child.name.startswith(f"{date_str}_")):
-            return child
+    """Use a stable immutable YYYY-MM-DD directory (never renamed dynamically)."""
     target = output_root / date_str
     target.mkdir(parents=True, exist_ok=True)
     return target
-
-
-def _finalize_date_dir_count(
-    date_dir: Path,
-    date_str: str,
-    log_fn: Callable[[str], None] = print,
-) -> Path:
-    if not date_dir.is_dir():
-        return date_dir
-    pkg_count = sum(
-        1
-        for child in date_dir.iterdir()
-        if child.is_dir() and ((child / "meta.json").is_file() or (child / "video_1080p.mp4").is_file())
-    )
-    if pkg_count == 0:
-        return date_dir
-    desired = date_dir.parent / f"{date_str}_共{pkg_count}个"
-    if date_dir != desired and not desired.exists():
-        for attempt in range(2):
-            try:
-                date_dir.rename(desired)
-                return desired
-            except OSError:
-                if attempt == 0:
-                    time.sleep(0.5)
-        log_fn(
-            f"[提示] 目录 {date_dir.name} 正被资源管理器或上传软件占用，暂保留原目录名"
-            f"（目录内已有 {pkg_count} 条视频，不影响正常使用）"
-        )
-    return date_dir
 
 
 def _make_package_dir(date_dir: Path, weibo_name: str, video: DouyinVideo) -> Path:
@@ -353,22 +319,8 @@ async def execute_pipeline(
             })
             log_fn(f"  [失败] {wb_name} ({vid.aweme_id}): {exc}")
 
-    final_date_dir = _finalize_date_dir_count(date_dir, today_str, log_fn=log_fn)
-    if final_date_dir != date_dir:
-        old_prefix = str(date_dir)
-        new_prefix = str(final_date_dir)
-        for c in cards:
-            for k in ("package_dir", "cover_path", "video_path"):
-                if c.get(k) and str(c[k]).startswith(old_prefix):
-                    c[k] = new_prefix + str(c[k])[len(old_prefix):]
-            c["date_str"] = final_date_dir.name
-        for entry in (ledger.get("videos") or {}).values():
-            if isinstance(entry, dict) and str(entry.get("package_dir", "")).startswith(old_prefix):
-                entry["package_dir"] = new_prefix + str(entry["package_dir"])[len(old_prefix):]
-        _save_ledger(cfg.ledger_path, ledger)
-    else:
-        for c in cards:
-            c.setdefault("date_str", final_date_dir.name)
+    for c in cards:
+        c.setdefault("date_str", today_str)
 
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     workbench_path = cfg.project_root / "工作台.html"
