@@ -6,6 +6,8 @@ import argparse
 import asyncio
 import datetime
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import mimetypes
 import os
 import re
@@ -13,6 +15,7 @@ import socket
 import subprocess
 import sys
 import threading
+import traceback
 import urllib.parse
 import webbrowser
 from http import HTTPStatus
@@ -132,12 +135,49 @@ def _load_existing_cards() -> list[dict[str, Any]]:
     return cards
 
 
-def _append_log(msg: str) -> None:
+_FILE_LOGGER: logging.Logger | None = None
+
+
+def _get_file_logger() -> logging.Logger:
+    global _FILE_LOGGER
+    if _FILE_LOGGER is not None:
+        return _FILE_LOGGER
+    cfg = load_config()
+    log_dir = cfg.project_root / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "app.log"
+    lg = logging.getLogger("douyin2weibo.ui")
+    lg.setLevel(logging.INFO)
+    lg.propagate = False
+    if not lg.handlers:
+        handler = RotatingFileHandler(
+            str(log_file),
+            maxBytes=2 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%Y-%m-%d %H:%M:%S"))
+        lg.addHandler(handler)
+    _FILE_LOGGER = lg
+    return lg
+
+
+def _append_log(msg: str, level: str = "INFO") -> None:
     ts = datetime.datetime.now().strftime("%H:%M:%S")
     with _STATE_LOCK:
         _APP_STATE["logs"].append(f"[{ts}] {msg}")
         if len(_APP_STATE["logs"]) > 400:
             _APP_STATE["logs"] = _APP_STATE["logs"][-400:]
+    try:
+        lg = _get_file_logger()
+        if level == "ERROR":
+            lg.error(msg)
+        elif level == "WARNING":
+            lg.warning(msg)
+        else:
+            lg.info(msg)
+    except Exception:
+        pass
 
 
 def _open_native_path(folder_path: Path, select_file: Path | None = None) -> None:
@@ -211,19 +251,20 @@ def _pick_native_folder(initial_dir: Path) -> str | None:
             f'  return ""\n'
             f'end try'
         )
-        res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=120)
+        res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
         out = (res.stdout or "").strip().rstrip("/")
         return out or None
     if sys.platform.startswith("win"):
         escaped = str(initial_dir).replace("'", "''")
         ps = (
+            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;"
             "Add-Type -AssemblyName System.Windows.Forms;"
             "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
             "$d.Description = '请选择解析视频存放目录';"
             f"$d.SelectedPath = '{escaped}';"
             "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }"
         )
-        res = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True, timeout=120)
+        res = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
         out = (res.stdout or "").strip()
         return out or None
     raise RuntimeError("当前系统不支持弹窗选目录，请直接点「改路径」输入文件夹路径。")
@@ -364,11 +405,15 @@ def _run_worker(payload: dict[str, Any]) -> None:
             f"全部完成：打包 {res['success_count']} 条，跳过已发 {res['skipped_red_count']} 条，失败 {len(res['failures'])} 条。"
         )
     except CaptchaRequiredError as exc:
-        _append_log(f"[已暂停] {exc}")
+        _append_log(f"[已暂停] {exc}", level="WARNING")
         with _STATE_LOCK:
             _APP_STATE["failures"] = [{"url": "-", "weibo_name": "风控/验证码", "error": str(exc)}]
     except Exception as exc:
-        _append_log(f"[出错] {exc}")
+        _append_log(f"[出错] {exc}", level="ERROR")
+        try:
+            _get_file_logger().error("Worker traceback:\n%s", traceback.format_exc())
+        except Exception:
+            pass
         with _STATE_LOCK:
             _APP_STATE["failures"] = [{"url": "-", "weibo_name": "运行错误", "error": str(exc)}]
     finally:
@@ -1357,15 +1402,26 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             cfg = load_config()
             ffmpeg_ok = Path(cfg.ffmpeg_path).is_file() or bool(shutil.which(cfg.ffmpeg_path))
             ffprobe_ok = Path(cfg.ffprobe_path).is_file() or bool(shutil.which(cfg.ffprobe_path))
+            commit = ""
+            if (cfg.project_root / ".git").exists():
+                try:
+                    c_res = _run_git(["rev-parse", "--short", "HEAD"], cfg.project_root, timeout=5)
+                    if c_res.returncode == 0:
+                        commit = c_res.stdout.strip()
+                except Exception:
+                    pass
             self._send_json({
                 "ok": ffmpeg_ok and ffprobe_ok and cfg.douyin_cookie_path.is_file(),
                 "platform": sys.platform,
+                "python": sys.version.split()[0],
+                "commit": commit,
                 "ffmpeg_path": cfg.ffmpeg_path,
                 "ffmpeg_ok": ffmpeg_ok,
                 "ffprobe_ok": ffprobe_ok,
                 "douyin_cookie_ok": cfg.douyin_cookie_path.is_file(),
                 "weibo_cookie_ok": cfg.weibo_cookie_path.is_file(),
                 "output_dir": str(cfg.output_dir),
+                "log_path": str(cfg.project_root / "logs" / "app.log"),
             })
             return
 
@@ -1643,12 +1699,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 return
             live_dir = _resolve_live_package_dir(cfg.output_dir, pkg_dir, aweme_id=aweme_id)
             if not live_dir or not live_dir.is_dir():
-                self._send_json(
-                    {"error": f"目录不存在（可能已被移动或删除）：{pkg_dir.name}，请刷新页面"},
-                    status=404,
-                )
+                msg = f"目录不存在（可能已被移动或删除）：{pkg_dir.name}，请刷新页面"
+                _get_file_logger().warning("POST /api/open-folder 404: req=%s aweme_id=%s", pkg_dir, aweme_id)
+                self._send_json({"error": msg}, status=404)
                 return
             live_sel = (live_dir / sel_path.name) if sel_path else None
+            _get_file_logger().info("POST /api/open-folder ok: dir=%s select=%s", live_dir, live_sel)
             _open_native_path(live_dir, live_sel)
             live_video = live_dir / "video_1080p.mp4"
             live_cover = live_dir / "cover.jpg"
@@ -1696,6 +1752,10 @@ def main() -> None:
     _SERVER_REF["server"] = server
     _SERVER_REF["port"] = port
     url = f"http://127.0.0.1:{port}/"
+    try:
+        _get_file_logger().info("ui_server started on %s (platform=%s, python=%s)", url, sys.platform, sys.version.split()[0])
+    except Exception:
+        pass
     print(f"douyin2weibo 可视化控制台已启动：{url}")
     print("保持此窗口开启即可在浏览器中操作；关闭本窗口即退出服务。")
     if not args.no_open:

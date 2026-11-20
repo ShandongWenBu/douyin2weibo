@@ -19,26 +19,26 @@
 | 配置读取、Windows 文件名合法化 | `src/config.py` | `load_config()`, `sanitize_filename()`, `extract_title_and_hashtags()` |
 | 主流程编排、桌面日期归档（固定 `YYYY-MM-DD` 目录） | `src/main.py` | `execute_pipeline()`, `_get_or_create_date_dir()` |
 
-## 3. 跨平台与安全红线（修改必守）
-1. **Mac / Windows 双端兼容**：
-   - 文件路径一律用 `pathlib.Path`，文本读写一律显式 `encoding="utf-8"`（读取用户输入文件可用 `utf-8-sig`）。
-   - 生成文件夹或文件名必须经过 `sanitize_filename()`（过滤 `<>:"/\|?*` 和 Windows 保留名）。
-   - 不得引入仅 Mac 可用的命令（原生打开目录已在 `src/ui_server.py` 的 `_open_native_path()` 中区分 `darwin` / `win`）。
+## 3. 跨平台与安全红线（修改必守 — 推送前默认执行 Windows 三件套自检）
+1. **Windows 三件套推送前自检（每次改代码必查）**：
+   - **① 路径与命令引号**：一律用 `pathlib.Path`，生成文件名必须经过 `sanitize_filename()`；调用 Windows 原生命令（如 `explorer /select,"<路径>"`）时必须注意含空格/中文/反斜杠的引号转义，不得用 `list2cmdline` 把 `/select,` 包进引号。
+   - **② 文件/目录独占锁**：Windows 下禁止对正在被资源管理器或上传软件占用的活目录做动态改名（日期目录固定 `YYYY-MM-DD`，永不动态改名），删除/替换文件须做好异常兜底。
+   - **③ UTF-8 编码**：Windows 默认 GBK/CP936，所有文本读写和 `subprocess.run(..., text=True)` 必须显式传入 `encoding="utf-8"`（子进程输出建议加 `errors="replace"`；PowerShell 输出中文前加 `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;`）。
 2. **安全与风控**：
    - 遇到抖音或微博验证码/安全验证/登录跳转，必须立即抛出 `CaptchaRequiredError` 停止，严禁尝试自动绕过。
    - 搜索查重严禁去掉 `daily_search_limit` 和 `min_delay_sec` / `max_delay_sec` 随机延时保护。
 3. **Git 同步隔离**：
-   - `config.yaml`、`待发.txt`、`cookies/`、`ledger.json`、`.dedup_state.json`、`output/` 均在 `.gitignore` 中，**严禁强行提交含账号、手机号或 Cookie 的文件**。
+   - `config.yaml`、`待发.txt`、`cookies/`、`ledger.json`、`.dedup_state.json`、`output/`、`logs/` 均在 `.gitignore` 中，**严禁强行提交含账号、手机号或 Cookie 的文件**。
    - 若新增配置项，请同步更新 `config.example.yaml`。
 
-## 4. 修改后的最小验证步骤
-1. 语法与转义检查（Mac / Windows 通用）：
-   ```bash
-   # Mac:
-   .venv/bin/python -W error -m py_compile src/*.py
-   # Windows:
-   .venv\Scripts\python.exe -W error -m py_compile src/*.py
-   ```
-2. 环境自检接口（启动控制台后可访问）：
-   - `GET http://127.0.0.1:8765/api/health` 返回 `ffmpeg_ok`、`ffprobe_ok`、`douyin_cookie_ok`、`weibo_cookie_ok` 与当前 `output_dir`。
-3. 改完 `src/ui_server.py` 后，需关闭并重新双击 `启动控制台.bat`（或 `启动控制台.command`），然后刷新浏览器页面生效。
+## 4. 自动落盘日志与自检排障（供本地 Agent 快速生成 Issue）
+- **滚动日志文件**：`logs/app.log`（UTF-8，单文件 2 MB，最多保留 3 份，由 `src/ui_server.py` 自动写入启动信息、处理日志、接口警告及完整异常堆栈，不记录 Cookie/密钥）。
+- **环境自检接口**：`GET http://127.0.0.1:8765/api/health` 返回 `platform`、`python`、`commit`、`ffmpeg_ok`、`ffprobe_ok`、`douyin_cookie_ok`、`weibo_cookie_ok`、`output_dir` 与 `log_path`。
+- **语法与转义检查（Mac / Windows 通用）**：
+  ```bash
+  # Mac:
+  .venv/bin/python -W error -m py_compile src/*.py
+  # Windows:
+  .venv\Scripts\python.exe -W error -m py_compile src/*.py
+  ```
+- **Windows 排查约定**：生产机（Windows）本地 Agent 排查问题时优先读取 `logs/app.log` 和 `/api/health`，总结结构化 Issue 交由主开发机修改并推送，尽量避免直接在 Windows 本地改 `src/` 造成 `git pull` 冲突。

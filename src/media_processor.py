@@ -29,7 +29,7 @@ def probe_video(ffprobe_path: str, video_path: Path) -> ProbeInfo:
         "-of", "json",
         str(video_path),
     ]
-    res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
     data = json.loads(res.stdout)
     v_stream = None
     a_stream = None
@@ -101,7 +101,7 @@ def transcode_to_1080p(
             cmd.extend(["-c:a", "aac", "-b:a", cfg.audio_bitrate])
     cmd.append(str(tmp_dst))
 
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if proc.returncode != 0:
         if tmp_dst.exists():
             tmp_dst.unlink()
