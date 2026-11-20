@@ -28,6 +28,7 @@ from .cookie_login import login_and_save_cookie
 from .douyin_fetcher import CaptchaRequiredError
 from .input_parser import TaskInput, parse_line, parse_text_block
 from .main import _load_ledger, _save_ledger, execute_pipeline
+from .updater import apply_update, check_for_updates, run_git
 
 _STATE_LOCK = threading.Lock()
 _STOP_DEDUP_EVENT = threading.Event()
@@ -268,21 +269,6 @@ def _pick_native_folder(initial_dir: Path) -> str | None:
         out = (res.stdout or "").strip()
         return out or None
     raise RuntimeError("当前系统不支持弹窗选目录，请直接点「改路径」输入文件夹路径。")
-
-
-def _run_git(args: list[str], cwd: Path, timeout: int = 20) -> subprocess.CompletedProcess[str]:
-    env = dict(os.environ)
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    return subprocess.run(
-        ["git", *args],
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout,
-        env=env,
-    )
 
 
 def _schedule_self_restart() -> None:
@@ -964,7 +950,7 @@ _HTML_PAGE = """<!DOCTYPE html>
         if (d.up_to_date) {
           banner.style.background = "var(--green-bg)";
           banner.style.borderColor = "var(--green-bd)";
-          banner.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><span>✅ 已是最新版本（当前版本 <code>${esc(d.local_commit)}</code>）</span><button class="btn" onclick="document.getElementById('update-banner').style.display='none'">关闭</button></div>`;
+          banner.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><span>✅ 已是最新版本（当前版本 <code>${esc(d.local_commit)}</code> · ${esc(d.via || "直连")}）</span><button class="btn" onclick="document.getElementById('update-banner').style.display='none'">关闭</button></div>`;
         } else {
           banner.style.background = "#eff6ff";
           banner.style.borderColor = "#bfdbfe";
@@ -972,7 +958,7 @@ _HTML_PAGE = """<!DOCTYPE html>
           banner.innerHTML = `
             <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
               <div>
-                <strong>🆕 发现 ${d.behind_count} 个更新</strong>（当前 <code>${esc(d.local_commit)}</code> → 最新 <code>${esc(d.remote_commit)}</code>）
+                <strong>🆕 发现 ${d.behind_count} 个更新</strong>（当前 <code>${esc(d.local_commit)}</code> → 最新 <code>${esc(d.remote_commit)}</code> · ${esc(d.via || "直连")}）
                 ${logs ? `<ul style="margin:6px 0 0 18px;padding:0;font-size:12.5px;">${logs}</ul>` : ""}
               </div>
               <div style="display:flex;gap:8px;align-items:center;">
@@ -1405,7 +1391,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             commit = ""
             if (cfg.project_root / ".git").exists():
                 try:
-                    c_res = _run_git(["rev-parse", "--short", "HEAD"], cfg.project_root, timeout=5)
+                    c_res = run_git(["rev-parse", "--short", "HEAD"], cfg.project_root, timeout=5)
                     if c_res.returncode == 0:
                         commit = c_res.stdout.strip()
                 except Exception:
@@ -1620,35 +1606,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/check-update":
             cfg = load_config()
-            root = cfg.project_root
-            if not (root / ".git").exists():
-                self._send_json({"error": "当前目录不是 Git 仓库（请用 git clone 拉取项目）"}, status=400)
-                return
             try:
-                fetch_res = _run_git(["fetch", "origin"], root, timeout=20)
-                if fetch_res.returncode != 0:
-                    err_msg = (fetch_res.stderr or fetch_res.stdout or "git fetch 失败").strip()
-                    self._send_json({"error": err_msg}, status=400)
-                    return
-                local_c = _run_git(["rev-parse", "--short", "HEAD"], root).stdout.strip()
-                upstream_ref = _run_git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], root)
-                remote_branch = upstream_ref.stdout.strip() if upstream_ref.returncode == 0 else "origin/main"
-                remote_c = _run_git(["rev-parse", "--short", remote_branch], root).stdout.strip()
-                cnt_raw = _run_git(["rev-list", "--count", f"HEAD..{remote_branch}"], root).stdout.strip()
-                behind = int(cnt_raw or "0")
-                changelog: list[str] = []
-                if behind > 0:
-                    log_raw = _run_git(["log", "--format=%h %s", f"HEAD..{remote_branch}", "-n", "6"], root).stdout
-                    changelog = [ln.strip() for ln in log_raw.splitlines() if ln.strip()]
-                self._send_json({
-                    "ok": True,
-                    "up_to_date": behind == 0,
-                    "local_commit": local_c,
-                    "remote_commit": remote_c,
-                    "behind_count": behind,
-                    "changelog": changelog,
-                })
+                info = check_for_updates(cfg.project_root, cfg.github_mirrors)
+                self._send_json(info)
+            except RuntimeError as exc:
+                _get_file_logger().warning("POST /api/check-update failed: %s", exc)
+                self._send_json({"error": str(exc)}, status=400)
             except Exception as exc:
+                _get_file_logger().error("POST /api/check-update error: %s", exc)
                 self._send_json({"error": str(exc)}, status=500)
             return
 
@@ -1658,24 +1623,17 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     self._send_json({"error": "当前有下载或登录任务在运行，请等完成后再更新"}, status=409)
                     return
             cfg = load_config()
-            root = cfg.project_root
             try:
-                old_req = (root / "requirements.txt").read_text(encoding="utf-8") if (root / "requirements.txt").is_file() else ""
-                pull_res = _run_git(["pull", "--ff-only"], root, timeout=30)
-                if pull_res.returncode != 0:
-                    err_msg = (pull_res.stderr or pull_res.stdout or "git pull 失败").strip()
-                    self._send_json({"error": err_msg}, status=400)
-                    return
-                out_txt = (pull_res.stdout or "").strip()
-                if "Already up to date" in out_txt or "已经是最新的" in out_txt:
-                    self._send_json({"ok": True, "restarting": False, "message": "当前已是最新版本"})
-                    return
-                new_req = (root / "requirements.txt").read_text(encoding="utf-8") if (root / "requirements.txt").is_file() else ""
-                if new_req != old_req:
-                    subprocess.run([sys.executable, "-m", "pip", "install", "-r", str(root / "requirements.txt"), "--quiet"], check=False)
-                self._send_json({"ok": True, "restarting": True, "message": "更新拉取成功，正在重启控制台..."})
-                _schedule_self_restart()
+                res = apply_update(cfg.project_root, cfg.github_mirrors)
+                _get_file_logger().info("POST /api/apply-update: %s", res.get("message"))
+                self._send_json(res)
+                if res.get("restarting"):
+                    _schedule_self_restart()
+            except RuntimeError as exc:
+                _get_file_logger().warning("POST /api/apply-update failed: %s", exc)
+                self._send_json({"error": str(exc)}, status=400)
             except Exception as exc:
+                _get_file_logger().error("POST /api/apply-update error: %s", exc)
                 self._send_json({"error": str(exc)}, status=500)
             return
 

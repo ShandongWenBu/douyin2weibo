@@ -12,18 +12,17 @@ if errorlevel 1 (
   exit /b 1
 )
 
-git pull --ff-only
-if errorlevel 1 (
-  echo.
-  echo [提示] 拉取失败，请检查网络或确认是否配置了私有仓库访问权限。
-  pause
-  exit /b 1
+if exist ".venv\Scripts\python.exe" (
+  .venv\Scripts\python.exe -m src.updater
+) else (
+  git pull --ff-only
 )
 
-if exist ".venv\Scripts\python.exe" (
+if errorlevel 1 (
   echo.
-  echo 正在检查 Python 依赖是否有更新...
-  .venv\Scripts\python.exe -m pip install -r requirements.txt --quiet
+  echo [提示] 拉取失败，请检查网络或确认本地是否有未提交改动。
+  pause
+  exit /b 1
 )
 
 echo.

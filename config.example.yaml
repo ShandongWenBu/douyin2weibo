@@ -13,6 +13,12 @@ ffprobe_path: ""
 output_dir: "~/Desktop/微博待发视频"
 ledger_path: "ledger.json"
 
+# GitHub 更新镜像（直连 GitHub 超时时自动按顺序尝试下列国内镜像，不改原仓库配置）
+github_mirrors:
+  - "https://gh-proxy.com/"
+  - "https://ghfast.top/"
+  - "https://ghproxy.net/"
+
 # 微博文案清洗（点击「复制简介」时自动去掉仅限抖音的尾标话题，纯本地规则 0 费用）
 weibo_clean:
   strip_tag_keywords:

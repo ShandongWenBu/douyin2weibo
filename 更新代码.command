@@ -12,14 +12,12 @@ if ! command -v git >/dev/null 2>&1; then
   exit 1
 fi
 
-git pull --ff-only
-EXIT_CODE=$?
-
-if [ $EXIT_CODE -eq 0 ] && [ -x ".venv/bin/python" ]; then
-  if command -v uv >/dev/null 2>&1; then
-    echo "正在检查 Python 依赖..."
-    uv pip install --python .venv/bin/python -r requirements.txt
-  fi
+if [ -x ".venv/bin/python" ]; then
+  .venv/bin/python -m src.updater
+  EXIT_CODE=$?
+else
+  git pull --ff-only
+  EXIT_CODE=$?
 fi
 
 echo ""

@@ -9,7 +9,8 @@
 ## 2. 模块地图（改什么看哪里，无需全库通读）
 | 需求 / 问题 | 对应文件 | 核心函数 / 说明 |
 | --- | --- | --- |
-| 控制台网页 UI、按钮、30字提醒、去抖音尾标、本地 HTTP API | `src/ui_server.py` | `_HTML_PAGE`（前端）与 `ConsoleHandler`（`/api/health`, `/api/init`, `/api/login`, `/api/run`, `/api/status`, `/api/open-folder`, `/api/toggle-published`） |
+| 控制台网页 UI、按钮、30字提醒、去抖音尾标、本地 HTTP API | `src/ui_server.py` | `_HTML_PAGE`（前端）与 `ConsoleHandler`（`/api/health`, `/api/init`, `/api/login`, `/api/run`, `/api/status`, `/api/open-folder`, `/api/toggle-published`, `/api/check-update`, `/api/apply-update`） |
+| Git 检查更新与国内镜像自动回退 | `src/updater.py` | `check_for_updates()`, `apply_update()`（直连失败自动回退 `github_mirrors`） |
 | 可见浏览器扫码登录并保存 Cookie | `src/cookie_login.py` | `login_and_save_cookie()`（支持在界面点按钮或 CLI 扫码换号） |
 | 离线静态 `工作台.html` 模板 | `src/workbench.py` | `render_workbench_html()` |
 | 输入格式解析（`待发.txt`、CSV 行、分享口令、单链接） | `src/input_parser.py` | `parse_line()`, `load_tasks_from_file()` |
@@ -34,11 +35,11 @@
 ## 4. 自动落盘日志与自检排障（供本地 Agent 快速生成 Issue）
 - **滚动日志文件**：`logs/app.log`（UTF-8，单文件 2 MB，最多保留 3 份，由 `src/ui_server.py` 自动写入启动信息、处理日志、接口警告及完整异常堆栈，不记录 Cookie/密钥）。
 - **环境自检接口**：`GET http://127.0.0.1:8765/api/health` 返回 `platform`、`python`、`commit`、`ffmpeg_ok`、`ffprobe_ok`、`douyin_cookie_ok`、`weibo_cookie_ok`、`output_dir` 与 `log_path`。
-- **语法与转义检查（Mac / Windows 通用）**：
+- **语法与回归测试（Mac / Windows 通用，推送前必跑）**：
   ```bash
   # Mac:
-  .venv/bin/python -W error -m py_compile src/*.py
+  .venv/bin/python -W error -m py_compile src/*.py && .venv/bin/python -m unittest discover -s tests -v
   # Windows:
-  .venv\Scripts\python.exe -W error -m py_compile src/*.py
+  .venv\Scripts\python.exe -W error -m py_compile src/*.py && .venv\Scripts\python.exe -m unittest discover -s tests -v
   ```
 - **Windows 排查约定**：生产机（Windows）本地 Agent 排查问题时优先读取 `logs/app.log` 和 `/api/health`，总结结构化 Issue 交由主开发机修改并推送，尽量避免直接在 Windows 本地改 `src/` 造成 `git pull` 冲突。

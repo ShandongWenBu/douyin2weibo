@@ -20,6 +20,11 @@ _WIN_RESERVED_NAMES = {
     *(f"LPT{i}" for i in range(1, 10)),
 }
 _HASHTAG_RE = re.compile(r"#([^\s#]+)")
+DEFAULT_GITHUB_MIRRORS = [
+    "https://gh-proxy.com/",
+    "https://ghfast.top/",
+    "https://ghproxy.net/",
+]
 
 
 @dataclass
@@ -60,6 +65,7 @@ class AppConfig:
     dedup_state_path: Path
     latest_per_profile: int = 1
     strip_tag_keywords: list[str] = field(default_factory=list)
+    github_mirrors: list[str] = field(default_factory=lambda: list(DEFAULT_GITHUB_MIRRORS))
     transcode: TranscodeConfig = field(default_factory=TranscodeConfig)
     dedup: DedupConfig = field(default_factory=DedupConfig)
 
@@ -132,6 +138,12 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     ledger_path = _resolve_path(raw.get("ledger_path"), base, "ledger.json")
     wc_raw = raw.get("weibo_clean") or {}
     strip_keywords = [str(x).strip() for x in (wc_raw.get("strip_tag_keywords") or []) if str(x).strip()]
+    raw_mirrors = raw.get("github_mirrors")
+    mirrors = (
+        [str(x).strip() for x in raw_mirrors if str(x).strip()]
+        if isinstance(raw_mirrors, list) and raw_mirrors
+        else list(DEFAULT_GITHUB_MIRRORS)
+    )
 
     return AppConfig(
         project_root=base,
@@ -152,6 +164,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         dedup_state_path=base / ".dedup_state.json",
         latest_per_profile=int(raw.get("latest_per_profile", 1)),
         strip_tag_keywords=strip_keywords,
+        github_mirrors=mirrors,
         transcode=transcode,
         dedup=dedup,
     )
