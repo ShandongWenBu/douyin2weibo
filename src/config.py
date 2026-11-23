@@ -19,12 +19,21 @@ _WIN_RESERVED_NAMES = {
     *(f"COM{i}" for i in range(1, 10)),
     *(f"LPT{i}" for i in range(1, 10)),
 }
-_HASHTAG_RE = re.compile(r"#([^\s#]+)")
+_HASHTAG_RE = re.compile(r"#([^\s#]+)#?")
 DEFAULT_GITHUB_MIRRORS = [
     "https://gh-proxy.com/",
     "https://ghfast.top/",
     "https://ghproxy.net/",
 ]
+DEFAULT_SPORTS_ACCOUNT_KEYWORDS = [
+    "体坛", "体育", "足球", "篮球", "乒乓", "羽毛球", "网球", "排球",
+    "台球", "斯诺克", "懂个球", "绿茵", "国足", "NBA", "CBA", "欧冠",
+    "英超", "西甲", "德甲", "意甲", "法甲", "中超", "奥运", "亚运",
+    "世锦赛", "田径", "游泳", "跳水", "体操", "冰雪", "冬奥", "短道",
+    "花滑", "拳击", "格斗", "UFC", "F1", "赛车", "马拉松", "高尔夫",
+    "棒球", "橄榄球", "冰球",
+]
+DEFAULT_SPORTS_REPLACE_TAGS = "#微博视频号迎新计划##一分钟精选视频扶持计划##V观体坛#"
 
 
 @dataclass
@@ -65,6 +74,8 @@ class AppConfig:
     dedup_state_path: Path
     latest_per_profile: int = 1
     strip_tag_keywords: list[str] = field(default_factory=list)
+    sports_account_keywords: list[str] = field(default_factory=lambda: list(DEFAULT_SPORTS_ACCOUNT_KEYWORDS))
+    sports_replace_tags: str = DEFAULT_SPORTS_REPLACE_TAGS
     github_mirrors: list[str] = field(default_factory=lambda: list(DEFAULT_GITHUB_MIRRORS))
     transcode: TranscodeConfig = field(default_factory=TranscodeConfig)
     dedup: DedupConfig = field(default_factory=DedupConfig)
@@ -138,6 +149,14 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     ledger_path = _resolve_path(raw.get("ledger_path"), base, "ledger.json")
     wc_raw = raw.get("weibo_clean") or {}
     strip_keywords = [str(x).strip() for x in (wc_raw.get("strip_tag_keywords") or []) if str(x).strip()]
+    raw_sports_kw = wc_raw.get("sports_account_keywords")
+    sports_keywords = (
+        [str(x).strip() for x in raw_sports_kw if str(x).strip()]
+        if isinstance(raw_sports_kw, list) and raw_sports_kw
+        else list(DEFAULT_SPORTS_ACCOUNT_KEYWORDS)
+    )
+    raw_sports_tags = str(wc_raw.get("sports_replace_tags") or "").strip()
+    sports_replace_tags = raw_sports_tags or DEFAULT_SPORTS_REPLACE_TAGS
     raw_mirrors = raw.get("github_mirrors")
     mirrors = (
         [str(x).strip() for x in raw_mirrors if str(x).strip()]
@@ -164,6 +183,8 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         dedup_state_path=base / ".dedup_state.json",
         latest_per_profile=int(raw.get("latest_per_profile", 1)),
         strip_tag_keywords=strip_keywords,
+        sports_account_keywords=sports_keywords,
+        sports_replace_tags=sports_replace_tags,
         github_mirrors=mirrors,
         transcode=transcode,
         dedup=dedup,
@@ -195,6 +216,65 @@ def extract_title_and_hashtags(desc: str) -> tuple[str, list[str], str]:
     if not title:
         title = full_desc[:40].strip() or "无标题"
     return title, hashtags, full_desc
+
+
+def _keyword_matches(haystack: str, keyword: str) -> bool:
+    kw = (keyword or "").strip()
+    if not kw or not haystack:
+        return False
+    low_hay = haystack.lower()
+    low_kw = kw.lower()
+    if kw.isascii() and kw.isalnum():
+        return bool(re.search(rf"(?<![a-z0-9]){re.escape(low_kw)}(?![a-z0-9])", low_hay))
+    return low_kw in low_hay
+
+
+def is_sports_account(
+    weibo_name: str = "",
+    author: str = "",
+    desc: str = "",
+    keywords: list[str] | None = None,
+) -> bool:
+    """Detect whether an item belongs to a sports account via names or hashtags."""
+    kws = keywords if keywords is not None else DEFAULT_SPORTS_ACCOUNT_KEYWORDS
+    if not kws:
+        return False
+    hashtags = " ".join(_HASHTAG_RE.findall(desc or ""))
+    haystack = " ".join(part for part in (weibo_name, author, hashtags) if part).strip()
+    return any(_keyword_matches(haystack, kw) for kw in kws)
+
+
+def format_weibo_description(
+    raw_desc: str,
+    strip_keywords: list[str] | None = None,
+    *,
+    is_sports: bool = False,
+    sports_replace_tags: str = DEFAULT_SPORTS_REPLACE_TAGS,
+    extra_tags: str = "",
+    clean_tags: bool = True,
+) -> str:
+    """Clean Douyin-only tags or replace all hashtags when classified as a sports account."""
+    text = (raw_desc or "").strip()
+    tags = _HASHTAG_RE.findall(text)
+    body = _HASHTAG_RE.sub("", text)
+    body = re.sub(r"\s+", " ", body).strip()
+
+    if is_sports:
+        rep = (sports_replace_tags or DEFAULT_SPORTS_REPLACE_TAGS).strip()
+        text = " ".join(part for part in (body, rep) if part).strip()
+    elif clean_tags:
+        strips = [kw for kw in (strip_keywords or []) if kw]
+        kept = [
+            f"#{t}#"
+            for t in tags
+            if t and not any(kw in t for kw in strips)
+        ]
+        text = " ".join(part for part in (body, "".join(kept)) if part).strip()
+
+    extra = (extra_tags or "").strip()
+    if extra:
+        text = f"{text} {extra}".strip() if text else extra
+    return text
 
 
 def save_output_dir_to_config(new_dir: str, config_path: Path | None = None) -> Path:

@@ -23,7 +23,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from .config import load_config, save_output_dir_to_config
+from .config import (
+    DEFAULT_SPORTS_ACCOUNT_KEYWORDS,
+    DEFAULT_SPORTS_REPLACE_TAGS,
+    is_sports_account,
+    load_config,
+    save_output_dir_to_config,
+)
 from .cookie_login import login_and_save_cookie
 from .douyin_fetcher import CaptchaRequiredError
 from .input_parser import TaskInput, parse_line, parse_text_block
@@ -110,18 +116,25 @@ def _load_existing_cards() -> list[dict[str, Any]]:
         out_res = meta.get("output_resolution") or ""
         res_info = f"{src_res} -> {out_res}".strip(" ->")
         is_pub = bool((videos_ledger.get(aweme_id) or {}).get("published", False))
+        wb_name = meta.get("weibo_name") or meta.get("author") or ""
+        author = meta.get("author") or ""
+        desc = meta.get("desc") or ""
+        is_sports = bool(meta.get("is_sports")) or is_sports_account(
+            wb_name, author, desc, cfg.sports_account_keywords
+        )
         cards.append({
             "aweme_id": aweme_id,
             "date_str": date_day,
-            "weibo_name": meta.get("weibo_name") or meta.get("author") or "",
+            "weibo_name": wb_name,
             "weibo_uid": meta.get("weibo_uid") or "",
-            "author": meta.get("author") or "",
+            "author": author,
             "publish_time": meta.get("publish_time") or "",
             "duration_sec": meta.get("duration_sec") or 0,
             "resolution_info": res_info,
             "video_size_mb": meta.get("video_size_mb"),
             "title": meta.get("title") or "",
-            "desc": meta.get("desc") or "",
+            "desc": desc,
+            "is_sports": is_sports,
             "video_page_url": meta.get("video_page_url") or "",
             "dedup_status": dr.get("status") or "off",
             "dedup_label": dr.get("label") or "未查重",
@@ -681,10 +694,14 @@ _HTML_PAGE = """<!DOCTYPE html>
         <div class="toolbar-group" id="filter-bar"></div>
         <div class="toolbar-group" style="background:#f8fafc; border:1px solid var(--border); padding:5px 10px; border-radius:9px; font-size:12.5px;">
           <label style="display:inline-flex; align-items:center; gap:5px; cursor:pointer; font-weight:600;">
-            <input type="checkbox" id="opt-clean-tags" checked onchange="saveCleanOpts()" />
+            <input type="checkbox" id="opt-clean-tags" checked onchange="saveCleanOpts();renderCards();" />
             自动去抖音尾标
           </label>
-          <input type="text" id="opt-extra-tags" placeholder="附加微博话题（可选，如 #三角洲行动[超话]#）" style="width:255px; padding:4px 8px; font-size:12px;" oninput="saveCleanOpts()" />
+          <label style="display:inline-flex; align-items:center; gap:5px; cursor:pointer; font-weight:600; color:#0369a1;">
+            <input type="checkbox" id="opt-sports-tags" checked onchange="saveCleanOpts();renderCards();" />
+            体育号换指定标签
+          </label>
+          <input type="text" id="opt-extra-tags" placeholder="附加微博话题（可选，如 #三角洲行动[超话]#）" style="width:240px; padding:4px 8px; font-size:12px;" oninput="saveCleanOpts();renderCards();" />
         </div>
       </div>
       <div id="failures-box" style="margin-bottom:12px;"></div>
@@ -708,6 +725,17 @@ _HTML_PAGE = """<!DOCTYPE html>
     let viewMode = localStorage.getItem("d2w_view_mode") || "card";
     let runnerCollapsed = localStorage.getItem("d2w_runner_collapsed") === "1";
     let stripTagKeywords = ["抖音精选", "上抖音", "来抖音", "抖音小助手", "青年创作者成长计划", "氪金兽"];
+    let sportsAccountKeywords = [
+      "体坛", "体育", "足球", "篮球", "乒乓", "羽毛球", "网球", "排球",
+      "台球", "斯诺克", "懂个球", "绿茵", "国足", "NBA", "CBA", "欧冠",
+      "英超", "西甲", "德甲", "意甲", "法甲", "中超", "奥运", "亚运",
+      "世锦赛", "田径", "游泳", "跳水", "体操", "冰雪", "冬奥", "短道",
+      "花滑", "拳击", "格斗", "UFC", "F1", "赛车", "马拉松", "高尔夫",
+      "棒球", "橄榄球", "冰球"
+    ];
+    let sportsReplaceTags = "#微博视频号迎新计划##一分钟精选视频扶持计划##V观体坛#";
+    let sportsOverrides = {};
+    let renderedCards = [];
     let parsedAccounts = [];
     let cardsData = [];
     let failuresData = [];
@@ -717,19 +745,73 @@ _HTML_PAGE = """<!DOCTYPE html>
     function loadCleanOpts() {
       const cleanOn = localStorage.getItem("d2w_clean_tags");
       document.getElementById("opt-clean-tags").checked = cleanOn === null ? true : cleanOn === "1";
+      const sportsOn = localStorage.getItem("d2w_sports_tags");
+      document.getElementById("opt-sports-tags").checked = sportsOn === null ? true : sportsOn === "1";
       document.getElementById("opt-extra-tags").value = localStorage.getItem("d2w_extra_tags") || "";
+      try {
+        sportsOverrides = JSON.parse(localStorage.getItem("d2w_sports_overrides") || "{}") || {};
+      } catch {
+        sportsOverrides = {};
+      }
     }
     function saveCleanOpts() {
       localStorage.setItem("d2w_clean_tags", document.getElementById("opt-clean-tags").checked ? "1" : "0");
+      localStorage.setItem("d2w_sports_tags", document.getElementById("opt-sports-tags").checked ? "1" : "0");
       localStorage.setItem("d2w_extra_tags", document.getElementById("opt-extra-tags").value || "");
     }
-    function formatWeiboDesc(rawDesc) {
-      let text = String(rawDesc || "").trim();
+    function cardSportsKey(c) {
+      return `${c.aweme_id || c.package_dir || c.title || ""}::${c.weibo_name || ""}`;
+    }
+    function sportsKeywordMatches(haystack, kw) {
+      const cleanKw = String(kw || "").trim().toLowerCase();
+      const hay = String(haystack || "").toLowerCase();
+      if (!cleanKw || !hay) return false;
+      if (/^[a-z0-9]+$/i.test(cleanKw)) {
+        const re = new RegExp(`(?:^|[^a-z0-9])${cleanKw}(?:$|[^a-z0-9])`, "i");
+        return re.test(hay);
+      }
+      return hay.includes(cleanKw);
+    }
+    function isSportsCard(c) {
+      if (!c || typeof c !== "object") return false;
+      const key = cardSportsKey(c);
+      if (Object.prototype.hasOwnProperty.call(sportsOverrides, key)) {
+        return Boolean(sportsOverrides[key]);
+      }
+      if (Array.isArray(sportsAccountKeywords) && sportsAccountKeywords.length) {
+        const tags = (String(c.desc || "").match(/#[^\\s#]+#?/g) || []).join(" ");
+        const haystack = [c.weibo_name || "", c.author || "", tags].join(" ").trim();
+        if (sportsAccountKeywords.some(kw => sportsKeywordMatches(haystack, kw))) {
+          return true;
+        }
+        return false;
+      }
+      return Boolean(c.is_sports);
+    }
+    function toggleCardSports(idx) {
+      const c = renderedCards[idx];
+      if (!c) return;
+      const key = cardSportsKey(c);
+      const nextVal = !isSportsCard(c);
+      sportsOverrides[key] = nextVal;
+      localStorage.setItem("d2w_sports_overrides", JSON.stringify(sportsOverrides));
+      renderCards();
+      showToast(nextVal ? "已切换为体育号：全部标签将替换为指定体育标签" : "已切换为普通号：仅按规则去抖音尾标");
+    }
+    function formatWeiboDesc(cardOrDesc) {
+      const isObj = cardOrDesc && typeof cardOrDesc === "object";
+      let text = String(isObj ? (cardOrDesc.desc || "") : (cardOrDesc || "")).trim();
       const doClean = document.getElementById("opt-clean-tags").checked;
+      const doSports = document.getElementById("opt-sports-tags").checked;
       const extra = (document.getElementById("opt-extra-tags").value || "").trim();
-      if (doClean) {
-        const tags = text.match(/#[^\\s#]+/g) || [];
-        let body = text.replace(/#[^\\s#]+/g, "").replace(/\\s+/g, " ").trim();
+      const sportsHit = isObj && doSports && isSportsCard(cardOrDesc);
+      if (sportsHit) {
+        const body = text.replace(/#[^\\s#]+#?/g, "").replace(/\\s+/g, " ").trim();
+        const rep = String(sportsReplaceTags || "#微博视频号迎新计划##一分钟精选视频扶持计划##V观体坛#").trim();
+        text = [body, rep].filter(Boolean).join(" ").trim();
+      } else if (doClean) {
+        const tags = text.match(/#[^\\s#]+#?/g) || [];
+        let body = text.replace(/#[^\\s#]+#?/g, "").replace(/\\s+/g, " ").trim();
         const kept = [];
         for (const t of tags) {
           const cleanName = t.replace(/^#+|#+$/g, "");
@@ -743,6 +825,13 @@ _HTML_PAGE = """<!DOCTYPE html>
         text = text ? (text + " " + extra) : extra;
       }
       return text;
+    }
+    function copyCardDesc(idx, btnEl) {
+      const c = renderedCards[idx];
+      if (!c) return;
+      const doSports = document.getElementById("opt-sports-tags").checked;
+      const sportsHit = doSports && isSportsCard(c);
+      copyText(formatWeiboDesc(c), sportsHit ? "体育号微博简介（已换指定标签）" : "微博简介", btnEl);
     }
 
     function showToast(msg) {
@@ -1087,6 +1176,8 @@ _HTML_PAGE = """<!DOCTYPE html>
       });
 
       const container = document.getElementById("cards-container");
+      renderedCards = visible;
+      const doSports = document.getElementById("opt-sports-tags").checked;
       if (!visible.length) {
         container.innerHTML = `<div style="padding:36px;text-align:center;color:#64748b;">当前筛选条件下暂无视频记录。</div>`;
       } else if (viewMode === "table") {
@@ -1105,13 +1196,18 @@ _HTML_PAGE = """<!DOCTYPE html>
                 </tr>
               </thead>
               <tbody>
-                ${visible.map(c => {
+                ${visible.map((c, i) => {
                   const coverUrl = c.cover_path ? `/files?path=${encodeURIComponent(c.cover_path)}` : "";
+                  const sportsDetected = isSportsCard(c);
+                  const sportsActive = doSports && sportsDetected;
                   return `
                     <tr class="${c.published ? "published" : ""}">
                       <td>${coverUrl ? `<img class="thumb-sm" src="${coverUrl}" />` : "-"}</td>
                       <td>
-                        <div><span class="wb-tag">${esc(c.weibo_name)}</span></div>
+                        <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">
+                          <span class="wb-tag">${esc(c.weibo_name)}</span>
+                          <button type="button" class="pill ${sportsDetected ? "status-green" : ""}" style="font-size:11px;padding:1px 6px;" title="点击可手动切换体育号/普通号" onclick="toggleCardSports(${i})">${sportsDetected ? "🏅 体育号" : "普通号"}</button>
+                        </div>
                         <div class="sub" style="margin-top:4px;">${esc(c.date_str)} · ${fmtDur(c.duration_sec)}</div>
                       </td>
                       <td style="max-width:280px;">
@@ -1133,7 +1229,7 @@ _HTML_PAGE = """<!DOCTYPE html>
                         <div style="display:flex;gap:5px;flex-wrap:wrap;">
                           <button class="btn btn-soft" onclick='copyText(${JSON.stringify(c.title)}, "标题", this)'>复制标题</button>
                           ${(c.title||"").length > 30 ? `<button class="btn" style="color:#dc2626;" onclick='copyText(${JSON.stringify((c.title||"").slice(0,30))}, "前30字标题", this)'>✂️ 30字</button>` : ""}
-                          <button class="btn" onclick='copyText(formatWeiboDesc(${JSON.stringify(c.desc)}), "微博简介", this)'>复制简介</button>
+                          <button class="btn" style="${sportsActive ? "border-color:#86efac;background:#f0fdf4;color:#15803d;" : ""}" onclick="copyCardDesc(${i}, this)">${sportsActive ? "🏅 复制体育简介" : "复制简介"}</button>
                         </div>
                       </td>
                       <td>
@@ -1149,8 +1245,11 @@ _HTML_PAGE = """<!DOCTYPE html>
           </div>
         `;
       } else {
-        container.innerHTML = `<div class="grid">${visible.map(c => {
+        container.innerHTML = `<div class="grid">${visible.map((c, i) => {
           const coverUrl = c.cover_path ? `/files?path=${encodeURIComponent(c.cover_path)}` : "";
+          const sportsDetected = isSportsCard(c);
+          const sportsActive = doSports && sportsDetected;
+          const formattedPreview = formatWeiboDesc(c);
           const evHtml = (c.dedup_evidences || []).slice(0,2).map(ev =>
             `<div>• ${ev.is_own_account ? "[自家号]" : "[外部]"} <b>${esc(ev.author)}</b> (${Math.round(ev.similarity*100)}%) ${ev.post_url ? `<a href="${esc(ev.post_url)}" target="_blank">查看</a>` : ""}</div>`
           ).join("");
@@ -1168,7 +1267,10 @@ _HTML_PAGE = """<!DOCTYPE html>
               </div>
               <div class="body">
                 <div class="meta-row">
-                  <span class="wb-tag">微博：${esc(c.weibo_name)}</span>
+                  <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                    <span class="wb-tag">微博：${esc(c.weibo_name)}</span>
+                    <button type="button" class="pill ${sportsDetected ? "status-green" : ""}" style="font-size:11px;padding:2px 7px;" title="点击可手动切换体育号/普通号" onclick="toggleCardSports(${i})">${sportsDetected ? "🏅 体育号·已换标签" : "普通号（点此切体育）"}</button>
+                  </div>
                   <span>${esc(c.author)} · ${esc(c.publish_time)}</span>
                 </div>
                 <div class="meta-row">
@@ -1205,8 +1307,8 @@ _HTML_PAGE = """<!DOCTYPE html>
                   <div class="text-box">${esc(c.title)}</div>
                 </div>
                 <div>
-                  <div class="field-label"><span>简介（点击复制会自动按上方规则去抖音尾标）</span><button class="btn" onclick='copyText(formatWeiboDesc(${JSON.stringify(c.desc)}),"微博简介",this)'>📋 复制简介</button></div>
-                  <div class="text-box">${esc(c.desc)}</div>
+                  <div class="field-label"><span>${sportsActive ? "简介（🏅 已识别体育号：复制时全替换标签）" : "简介（点击复制会自动按上方规则去抖音尾标）"}</span><button class="btn" style="${sportsActive ? "border-color:#86efac;background:#f0fdf4;color:#15803d;" : ""}" onclick="copyCardDesc(${i}, this)">📋 ${sportsActive ? "复制简介（体育标签）" : "复制简介"}</button></div>
+                  <div class="text-box">${esc(sportsActive ? formattedPreview : c.desc)}</div>
                 </div>
 
                 <div class="footer-actions">
@@ -1339,6 +1441,12 @@ _HTML_PAGE = """<!DOCTYPE html>
       if (Array.isArray(d.strip_tag_keywords) && d.strip_tag_keywords.length) {
         stripTagKeywords = d.strip_tag_keywords;
       }
+      if (Array.isArray(d.sports_account_keywords) && d.sports_account_keywords.length) {
+        sportsAccountKeywords = d.sports_account_keywords;
+      }
+      if (typeof d.sports_replace_tags === "string" && d.sports_replace_tags.trim()) {
+        sportsReplaceTags = d.sports_replace_tags.trim();
+      }
       document.getElementById("output-root-path").textContent = d.output_dir || "";
       document.getElementById("raw-tasks-text").value = d.raw_tasks || "";
       parsedAccounts = d.accounts || [];
@@ -1435,6 +1543,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._send_json({
                 "output_dir": str(cfg.output_dir),
                 "strip_tag_keywords": cfg.strip_tag_keywords,
+                "sports_account_keywords": cfg.sports_account_keywords,
+                "sports_replace_tags": cfg.sports_replace_tags,
                 "raw_tasks": raw_tasks,
                 "accounts": accounts,
                 "cards": cards,

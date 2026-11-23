@@ -13,7 +13,13 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
 
-from .config import AppConfig, load_config, sanitize_filename
+from .config import (
+    AppConfig,
+    format_weibo_description,
+    is_sports_account,
+    load_config,
+    sanitize_filename,
+)
 from .douyin_fetcher import (
     CaptchaRequiredError,
     DouyinVideo,
@@ -175,6 +181,7 @@ async def execute_pipeline(
     for idx, (task, vid) in enumerate(expanded_items, start=1):
         dr = dedup_map.get(vid.aweme_id) or DedupResult(status="off", label="未查重", summary="")
         wb_name = task.weibo_name or vid.author
+        sports_flag = is_sports_account(wb_name, vid.author, vid.desc, cfg.sports_account_keywords)
         existing_ledger = (ledger.get("videos") or {}).get(vid.aweme_id) or {}
         is_pub = bool(existing_ledger.get("published", False))
 
@@ -192,6 +199,7 @@ async def execute_pipeline(
                 "video_size_mb": None,
                 "title": vid.title,
                 "desc": vid.desc,
+                "is_sports": sports_flag,
                 "video_page_url": vid.video_page_url,
                 "dedup_status": dr.status,
                 "dedup_label": dr.label,
@@ -249,8 +257,14 @@ async def execute_pipeline(
                 if raw_cover_path.exists():
                     raw_cover_path.unlink()
 
+                formatted_desc = format_weibo_description(
+                    vid.desc,
+                    cfg.strip_tag_keywords,
+                    is_sports=sports_flag,
+                    sports_replace_tags=cfg.sports_replace_tags,
+                )
                 (pkg_dir / "标题.txt").write_text(vid.title, encoding="utf-8")
-                (pkg_dir / "简介.txt").write_text(vid.desc, encoding="utf-8")
+                (pkg_dir / "简介.txt").write_text(formatted_desc, encoding="utf-8")
 
                 size_mb = round(final_video_path.stat().st_size / (1024 * 1024), 2)
                 res_info = f"{vid.width}x{vid.height} -> {out_probe.width}x{out_probe.height}"
@@ -259,6 +273,7 @@ async def execute_pipeline(
                     "weibo_name": wb_name,
                     "weibo_uid": task.weibo_uid,
                     "author": vid.author,
+                    "is_sports": sports_flag,
                     "share_url": vid.share_url,
                     "video_page_url": vid.video_page_url,
                     "publish_time": vid.publish_time_str,
@@ -300,6 +315,7 @@ async def execute_pipeline(
                 "video_size_mb": size_mb,
                 "title": vid.title,
                 "desc": vid.desc,
+                "is_sports": sports_flag,
                 "video_page_url": vid.video_page_url,
                 "dedup_status": dr.status,
                 "dedup_label": dr.label,

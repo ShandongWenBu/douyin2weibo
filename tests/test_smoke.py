@@ -16,7 +16,15 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from src.config import DedupConfig, load_config, sanitize_filename, save_output_dir_to_config
+from src.config import (
+    DEFAULT_SPORTS_REPLACE_TAGS,
+    DedupConfig,
+    format_weibo_description,
+    is_sports_account,
+    load_config,
+    sanitize_filename,
+    save_output_dir_to_config,
+)
 from src.douyin_fetcher import DouyinVideo, classify_douyin_url
 from src.input_parser import parse_text_block
 from src.main import _get_or_create_date_dir
@@ -225,6 +233,49 @@ class RegressionSmokeTests(unittest.TestCase):
         log_path = Path(__file__).resolve().parent.parent / "logs" / "app.log"
         self.assertTrue(log_path.is_file())
         self.assertIn("回归测试：logs/app.log 写入验证", log_path.read_text(encoding="utf-8"))
+
+    def test_sports_account_detection_and_tag_replacement(self) -> None:
+        # 1. Real sports account names match
+        for wb in ("体坛视角1", "奶酪懂个球", "闪耀体坛", "足球有故事", "星河乒乓", "绿茵列传"):
+            self.assertTrue(is_sports_account(weibo_name=wb), f"{wb} should be detected as sports")
+
+        # 2. Tag/author fallback matches, while gaming/random/prose-only stay non-sports
+        self.assertTrue(is_sports_account(weibo_name="普通号", author="普通作者", desc="绝杀！#NBA #篮球"))
+        self.assertFalse(is_sports_account(weibo_name="洛鸢三角洲行动", author="洛鸢", desc="撤离成功 #三角洲行动# #抖音精选#"))
+        self.assertFalse(is_sports_account(weibo_name="小蛙三角洲行动", author="userF10", desc="今天聊个打篮球段子 #搞笑日常#"))
+
+        # 3. Sports account replaces all hashtags cleanly with zero stray '#'
+        raw_sports = "劳资风云：姆巴佩与俱乐部争议不断 #足球# #姆巴佩 #抖音精选# #青年创作者成长计划#"
+        replaced = format_weibo_description(
+            raw_sports,
+            ["抖音精选", "青年创作者成长计划"],
+            is_sports=True,
+        )
+        self.assertEqual(
+            replaced,
+            f"劳资风云：姆巴佩与俱乐部争议不断 {DEFAULT_SPORTS_REPLACE_TAGS}",
+        )
+        self.assertEqual(
+            DEFAULT_SPORTS_REPLACE_TAGS,
+            "#微博视频号迎新计划##一分钟精选视频扶持计划##V观体坛#",
+        )
+
+        # 4. Non-sports account strips only strip_tag_keywords and leaves no stray '#'
+        raw_game = "猛攻撤离实录 #三角洲行动# #抖音精选# #青年创作者成长计划#"
+        cleaned_game = format_weibo_description(
+            raw_game,
+            ["抖音精选", "青年创作者成长计划"],
+            is_sports=False,
+        )
+        self.assertEqual(cleaned_game, "猛攻撤离实录 #三角洲行动#")
+
+        # 5. Legacy Windows config.yaml omitting sports keys still receives full defaults
+        with tempfile.TemporaryDirectory() as td:
+            legacy_cfg = Path(td) / "config.yaml"
+            legacy_cfg.write_text('weibo_clean:\n  strip_tag_keywords:\n    - "抖音精选"\n', encoding="utf-8")
+            loaded = load_config(legacy_cfg)
+            self.assertEqual(loaded.sports_replace_tags, DEFAULT_SPORTS_REPLACE_TAGS)
+            self.assertIn("体坛", loaded.sports_account_keywords)
 
 
 if __name__ == "__main__":
