@@ -250,6 +250,7 @@ class RegressionSmokeTests(unittest.TestCase):
             raw_sports,
             ["抖音精选", "青年创作者成长计划"],
             is_sports=True,
+            extra_tags="#三角洲行动[超话]#",
         )
         self.assertEqual(
             replaced,

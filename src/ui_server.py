@@ -809,7 +809,7 @@ _HTML_PAGE = """<!DOCTYPE html>
       if (sportsHit) {
         const body = text.replace(/#[^\\s#]+#?/g, "").replace(/\\s+/g, " ").trim();
         const rep = String(sportsReplaceTags || "#微博视频号迎新计划##一分钟精选视频扶持计划##V观体坛#").trim();
-        text = [body, rep].filter(Boolean).join(" ").trim();
+        return [body, rep].filter(Boolean).join(" ").trim();
       } else if (doClean) {
         const tags = text.match(/#[^\\s#]+#?/g) || [];
         let body = text.replace(/#[^\\s#]+#?/g, "").replace(/\\s+/g, " ").trim();

@@ -261,8 +261,8 @@ def format_weibo_description(
 
     if is_sports:
         rep = (sports_replace_tags or DEFAULT_SPORTS_REPLACE_TAGS).strip()
-        text = " ".join(part for part in (body, rep) if part).strip()
-    elif clean_tags:
+        return " ".join(part for part in (body, rep) if part).strip()
+    if clean_tags:
         strips = [kw for kw in (strip_keywords or []) if kw]
         kept = [
             f"#{t}#"
