@@ -682,7 +682,7 @@ _HTML_PAGE = """<!DOCTYPE html>
         </div>
         <div class="toolbar-group">
           <input type="text" class="search-input" id="search-box" placeholder="🔍 搜微博号 / 标题关键词..." oninput="renderCards()" />
-          <select class="date-select" id="date-filter" onchange="renderCards()">
+          <select class="date-select" id="date-filter" onchange="onDateFilterChange()">
             <option value="all">全部日期</option>
           </select>
           <button class="btn" id="btn-view-card" onclick="setViewMode('card')">🃏 卡片视图</button>
@@ -740,6 +740,7 @@ _HTML_PAGE = """<!DOCTYPE html>
     let cardsData = [];
     let failuresData = [];
     let currentFilter = "all";
+    let dateFilterTouched = false;
     let pollTimer = null;
 
     function loadCleanOpts() {
@@ -1122,9 +1123,21 @@ _HTML_PAGE = """<!DOCTYPE html>
     function statusEmoji(st) {
       return st === "green" ? "🟢" : st === "yellow" ? "🟡" : st === "red" ? "🔴" : "⚪";
     }
-    function refreshDateOptions() {
+    function getTodayStr() {
+      const dt = new Date();
+      const y = dt.getFullYear();
+      const m = String(dt.getMonth() + 1).padStart(2, "0");
+      const d = String(dt.getDate()).padStart(2, "0");
+      return `${y}-${m}-${d}`;
+    }
+    function onDateFilterChange() {
+      dateFilterTouched = true;
+      renderCards();
+    }
+    function refreshDateOptions(preferToday = false) {
       const sel = document.getElementById("date-filter");
-      const prev = sel.value || "all";
+      const today = getTodayStr();
+      const prev = sel.value || today;
       const statsByDay = {};
       for (const c of cardsData) {
         const d = c.date_str || "";
@@ -1133,10 +1146,24 @@ _HTML_PAGE = """<!DOCTYPE html>
         statsByDay[d].total++;
         if (!c.published) statsByDay[d].unpub++;
       }
+      if (!statsByDay[today]) {
+        statsByDay[today] = { total: 0, unpub: 0 };
+      }
       const dates = Object.keys(statsByDay).sort().reverse();
-      sel.innerHTML = `<option value="all">全部日期（共 ${cardsData.length} 条）</option>` +
-        dates.map(d => `<option value="${esc(d)}">${esc(d)}（共 ${statsByDay[d].total} 条 · 待发 ${statsByDay[d].unpub}）</option>`).join("");
-      if (dates.includes(prev) || prev === "all") sel.value = prev;
+      sel.innerHTML =
+        dates.map(d => {
+          const st = statsByDay[d];
+          const tag = d === today ? "今天 · " : "";
+          return `<option value="${esc(d)}">${esc(d)}（${tag}共 ${st.total} 条 · 待发 ${st.unpub}）</option>`;
+        }).join("") +
+        `<option value="all">全部日期（共 ${cardsData.length} 条）</option>`;
+      if (preferToday || !dateFilterTouched) {
+        sel.value = today;
+      } else if (dates.includes(prev) || prev === "all") {
+        sel.value = prev;
+      } else {
+        sel.value = today;
+      }
     }
     function renderCards() {
       const kw = (document.getElementById("search-box").value || "").trim().toLowerCase();
@@ -1179,7 +1206,11 @@ _HTML_PAGE = """<!DOCTYPE html>
       renderedCards = visible;
       const doSports = document.getElementById("opt-sports-tags").checked;
       if (!visible.length) {
-        container.innerHTML = `<div style="padding:36px;text-align:center;color:#64748b;">当前筛选条件下暂无视频记录。</div>`;
+        const dateSelNow = document.getElementById("date-filter").value || "all";
+        const isTodayEmpty = dateSelNow === getTodayStr() && cardsData.length > 0 && currentFilter === "all" && !document.getElementById("search-box").value.trim();
+        container.innerHTML = isTodayEmpty
+          ? `<div style="padding:36px;text-align:center;color:#64748b;">今天（${esc(dateSelNow)}）暂无视频记录，可直接点击顶部「全部日期」或选择历史日期查看往期 ${cardsData.length} 条视频。</div>`
+          : `<div style="padding:36px;text-align:center;color:#64748b;">当前筛选条件下暂无视频记录。</div>`;
       } else if (viewMode === "table") {
         container.innerHTML = `
           <div style="overflow-x:auto;">
@@ -1452,7 +1483,7 @@ _HTML_PAGE = """<!DOCTYPE html>
       parsedAccounts = d.accounts || [];
       cardsData = d.cards || [];
       renderAccounts();
-      refreshDateOptions();
+      refreshDateOptions(true);
       renderCards();
       if (d.running) startPolling();
     }
